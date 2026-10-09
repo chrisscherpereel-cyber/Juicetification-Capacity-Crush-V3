@@ -24,12 +24,52 @@ and then has to engineer** — which is where the idea actually lands.
 
 ---
 
+## What's new in V3
+
+V3 is V2 with a classroom-scale performance pass and three teaching changes. Every number below
+was measured against a running server, not estimated.
+
+**Faster with a class on it.** Streamlit serves every student from one process, so a click costs
+whatever the script costs, multiplied by everyone clicking at once.
+
+- **The guided-lab panel is an `st.fragment`.** Answering a prediction, estimate or reflection now
+  redraws only that panel instead of re-executing the whole 7,300-line script. With 30 concurrent
+  sessions, that interaction went from **1.93 s to 0.82 s**, and its payload from **43 KB to 5 KB**.
+- **The EOQ cost curve caches on the line configuration alone.** It used to be keyed on a
+  run-derived unit margin, so its ~11 simulations re-ran on every run for every student and were
+  never shared. That is **≈250 ms per run** returned to the EOQ labs and Sandbox, now shared
+  across the whole class.
+
+**Three changes aimed at understanding.**
+
+- **Run length.** The line can now run for **one shift (8 h), one week (40 h), six weeks (240 h)**
+  or a full year. This is the point of a dice game and it was previously invisible: the spread
+  between the best and worst run of the same balanced line is ~160% over one shift, 36% over a
+  week, and **4% over a year**, and an empty line only reaches its steady rate once the pipeline
+  fills (0.62 bottles/hr in the first shift against 3.37 over a year). Challenges are still judged
+  over a full year — a short run is shown but never consumes a try — because a pass/fail threshold
+  on a one-shift run would be a coin flip.
+- **Replications work inside the guided labs,** not just Sandbox. Judging a design from a single
+  run is the mistake the dice game exists to cure, and the Variability lab could not show a
+  distribution at all. Replications never count as a challenge try.
+- **Two costing corrections from the audit are now applied** (AUDIT.md §3). Ordering cost is
+  counted from the purchase orders the supplier actually shipped rather than inferred from
+  consumption, and raw material and processing are charged on the units a station *started* and
+  *worked* rather than only the good ones — so a scrapped bottle is no longer free. A
+  steady-state note now appears when the averages on screen describe a line that never settled.
+
+The simulation itself is unchanged: for a given seed and configuration the line produces exactly
+the same output as V2. The corrections above move money, not throughput, and the EOQ lesson still
+lands — the textbook EOQ and the measured cost-curve minimum agree exactly on the default line.
+
+---
+
 ## Features
 
 - **Sandbox mode** — a full dashboard with every control: per-station dice (capacity), work-in-process
   caps, supply reliability, demand variability, scrap/yield, safety stock, and the line's economics
-  (throughput, operating expense, inventory investment, EOQ). Multi-year replications show the *distribution*
-  of outcomes, not just one run.
+  (throughput, operating expense, inventory investment, EOQ). Replications show the *distribution*
+  of outcomes, not just one run — and in V3 they are available in the guided labs too.
 - **Guided Lab mode** — a sequenced set of laboratories that introduce one concept at a time:
   1. Operations — the Five Focusing Steps
   2. Little's Law
@@ -48,7 +88,10 @@ and then has to engineer** — which is where the idea actually lands.
 - **Distractor-specific feedback** — each wrong answer gets a one-line explanation aimed at the exact
   misconception behind it.
 - **Numeric-estimate steps** graded on a tolerance band with a number-line readout.
-- **Open design challenges** with an automated pass/fail check and limited tries.
+- **Open design challenges** with an automated pass/fail check and limited tries, always judged
+  over a full year so a noisy short run can never decide a pass.
+- **Selectable run length** — one shift, one week, six weeks or a full year, so the swings that a
+  year-long average hides become visible.
 - **Self-explanation prompts** after the key reveals; what the student writes is saved into their
   submission report.
 - **Each lab shows only its relevant controls and results** — the sidebar and dashboard are

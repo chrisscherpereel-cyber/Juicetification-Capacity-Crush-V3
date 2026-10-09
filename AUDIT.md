@@ -48,29 +48,45 @@ tuned lab numbers (verified: the Operations lab back-compat sequence
 | D2 | Assessment (spec 5) | Running **out of tries** marks a challenge step "done" (student may continue) — correct — but the sidebar progress tracker showed the same green ✓ as a pass, so "attempted" and "passed" looked identical on screen. (The PDF report already distinguished them.) | **Fixed** — progress card now shows "Challenges passed: X of Y" and flags attempted-but-not-passed separately. |
 | D3 | Save status (spec 6) | The caption always read "progress saved automatically" even if a save failed or no storage was configured. | **Fixed** — status now reports enabled/last-saved/failed honestly, and a storage-independent **backup/restore** (JSON) is provided. |
 
-## 3. Verified modeling inconsistencies — **proposed** (would move tuned numbers; not yet applied)
+## 3. Verified modeling inconsistencies — **applied in V3**
 
-These are real and reproduced, but fixing them shifts financial outputs and the tuned
-EOQ/economics lab thresholds and distractors. They are **documented, instrumented, and left for a
-deliberate re-tuning pass** rather than changed silently (per the spec).
+These were documented and instrumented in V2 but left unapplied, pending a deliberate re-tuning
+pass. V3 applies P1 and P2 and adds the P3 note. The re-tuning check was done and is recorded
+under each item; the simulation's random stream and throughput are untouched — these move money
+only.
 
 - **P1 — Ordering cost is inferred, not counted (spec 3C).** `orders = ceil(consumption/order_size)`
   ignores the actual replenishment events. The engine now **records the real counts**
   (`delivery_events`, `orders_placed`); e.g. a balanced JIT line consumes ≈6965 units but actually
-  ships 7112 lots over 2096 delivery hours — so the proxy understates orders. *Proposed:* cost
-  ordering from `orders_placed`. Impact: EOQ-lab dollar figures and the EOQ curve shift; EOQ-driver
-  thresholds/distractors need re-checking.
+  ships 7112 lots over 2096 delivery hours — so the proxy understates orders. **Applied:** both the
+  P&L and the EOQ cost curve now cost ordering from `orders_placed`. *Re-tuning check:* across
+  Q = 10…1500 the real count runs **3–8% above** the inferred one and keeps the same ~1/Q shape, so
+  the curve's minimum barely moves — on the default line the textbook EOQ (184) and the measured
+  cheapest order size (184) still agree exactly, and the "within 10% of best" challenge still
+  passes at the formula's answer. The two EOQ challenges score against the curve's own minimum, so
+  they re-tune themselves. A guard falls back to the inferred count when a P&L is priced at a
+  different order size than the run used (or when reading a run saved before V3).
 - **P2 — Raw & processing cost exclude scrapped units (spec 3B).** Raw cost uses Op 1 **good**
   output and processing cost uses **good** units, so bottles a station worked and then scrapped are
   effectively free. *Proposed:* charge raw on units **started** at Op 1 and processing on units
-  **worked** (`mv`) rather than good. Impact: economics/quality-lab costs rise where scrap is on.
+  **worked** (`mv`) rather than good. **Applied:** the engine now records `avg_worked` per station
+  and the P&L charges raw material on units Operation 1 started and processing on units worked.
+  *Re-tuning check:* with scrap off this changes nothing at all (worked == good); with 20% scrap at
+  Operation 1 raw cost rises from $3,280 to $4,100 (+25%), which is the intended lesson. No graded
+  threshold in the Quality lab is money-based — its challenges score on `total_output` and
+  `yield_rate` — so nothing needed re-tuning there.
 - **P3 — Little's Law boundary on non-stationary lines (spec 3F).** For a **stationary** line
   (balanced or WIP-capped) derived `W=L/λ` matches the measured sojourn within ~1% (test
   `test_littles_law_compatible_when_stationary`). For an **uncapped bottleneck** WIP never settles,
   so units still queued at run end are excluded from measured flow while still counted in average
   WIP — a legitimate finite-run/censoring divergence (~58% in the test case). *Proposed, optional:*
   a warm-up/observation window and an on-screen "line hasn't reached steady state" note. This is a
-  limitation to **explain**, not a bug to hide.
+  limitation to **explain**, not a bug to hide. **Applied (the note):** `steady_state_note()` now
+  prints under the dashboard headline in two cases — a run shorter than six weeks (the line spends
+  a real share of it just filling, so the average rate understates the steady rate) and a run that
+  ended with downstream WIP more than 1.5x its own average (WIP still climbing, so the averages
+  describe a line in transition). No warm-up window was introduced: discarding a warm-up period
+  would change the tuned numbers, and naming the limitation is what the lab is teaching.
 
 ## 4. Assumptions worth stating (not defects)
 
@@ -100,3 +116,45 @@ three targeted scenarios (moving constraint, quality location, capacity investme
 uncertainty). Phase 4: split engine / financials / lab definitions / assessment / reports /
 presentation into modules behind the current entry point. Each of P1/P2 above belongs with a
 re-tuning of the affected lab thresholds.
+
+## 7. V3 concurrency & performance pass (measured, not estimated)
+
+Method: a real Streamlit server driven by raw websocket clients speaking Streamlit's own
+protocol, 30 concurrent sessions, timings as medians. One process serves every student, so the
+GIL serialises script execution and latency scales roughly linearly with class size.
+
+| Interaction (30 concurrent sessions) | V2 | V3 |
+|---|---|---|
+| Answer a lab question (predict / estimate / reflect) | 1.93 s · 43 KB | **0.82 s · 5 KB** |
+| Any full rerun (navigation, Run) | 1.93 s · 43 KB | 1.93 s · 43 KB |
+| EOQ cost curve, per run | ~250 ms, never shared | cached on config, shared |
+
+- **Lab panel is an `st.fragment`.** Its buttons (navigation, "set up & run", the sidebar-focus
+  jump) escalate to `st.rerun(scope="app")` through `_lab_nav_cb`, because they change state the
+  main window renders from; only the answer widgets stay fragment-local.
+- **`_eoq_sim_point`** splits the EOQ scan's simulations from its arithmetic. The scan was keyed
+  on a run-derived `margin` (five distinct values in five runs), so it never hit cache.
+
+### Two things investigated and found *not* to be problems
+
+- **Inline CSS was not actually bloating reruns.** The ~28 KB `<style>` block looked like it was
+  re-sent on every interaction. It is not: Streamlit's `ForwardMsgCache` substitutes a `ref_hash`
+  for any cacheable message the client already holds, driven by `cached_message_hashes` on the
+  rerun request. A raw test client that omits that field sees 71 KB per rerun; a client that sends
+  it sees 43 KB. Real browsers send it. Moving the stylesheet to `static/app.css` was tried and
+  **reverted**: Streamlit's static handler serves only an allowlist of extensions (images, fonts,
+  `.pdf`, `.xml`, `.json`) and sends everything else as `text/plain` with `X-Content-Type-Options:
+  nosniff`, so browsers refuse the stylesheet outright. Do not retry this without a different host
+  for the file.
+- **Grading a challenge on a single stochastic run is sound at the year horizon.** Across 200
+  seeds and four plausible designs for the "Fix Line A" challenge, every design passed 100% of the
+  time; one-year throughput varies only about ±2%. The thresholds are robust. This is exactly why
+  the V3 run-length presets leave challenge grading pinned to a full year.
+
+### Attempted and reverted
+
+Making the **whole sidebar** a fragment (to make typing in it fragment-local) broke mode
+switching: with the mode/part/lab-choice radios inside the fragment, selecting "Sandbox" left
+`app_mode` on "Guided Lab". Reproduced in a real browser, not just in `AppTest`, and backed out.
+A future attempt should keep those three stateful radios *outside* the fragment and scope it to
+the configuration controls below them.

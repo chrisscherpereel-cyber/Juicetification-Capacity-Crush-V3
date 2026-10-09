@@ -98,9 +98,26 @@ DEFAULT_STARTING_INVENTORY = 0
 DEFAULT_SIMULATION_YEARS = 1
 DEFAULT_SUPPLY_RELIABILITY_LEGACY = None  # (reliability now lives in DEFAULT_SUPPLY_RELIABILITY)
 MAX_YEARS = 5
+
 HOURS_PER_DAY = 8
 DAYS_PER_YEAR = 262
 HOURS_PER_YEAR = DAYS_PER_YEAR * HOURS_PER_DAY
+# Run-length presets. The classic dice game runs ~20 rounds, where the swings are violent; a
+# full simulated year averages them almost away. Measured on a balanced 6-station 1d6 line, the
+# spread between the best and worst run is ~160% over one shift, 36% over a week, and 4% over a
+# year — and an empty line only reaches its steady rate after the pipeline fills (0.62 bottles/hr
+# in the first shift vs 3.37 over a year). Students need to see both: the same line looks wildly
+# unstable up close and perfectly predictable from far away. HORIZON_YEAR keeps the original
+# behaviour (simulation_years x HOURS_PER_YEAR) and stays the default.
+HORIZON_YEAR = "Full year"
+HORIZONS = {
+    "One shift (8 h)": HOURS_PER_DAY,
+    "One week (40 h)": HOURS_PER_DAY * 5,
+    "Six weeks (240 h)": HOURS_PER_DAY * 30,
+    HORIZON_YEAR: None,
+}
+DEFAULT_HORIZON = HORIZON_YEAR
+
 CAP_MIN, CAP_MAX = 0, 20
 
 # Whether the live "line running" playback is ON by default. Each user can flip it in the
@@ -185,7 +202,7 @@ def _snapshot_keys():
     """The sidebar / run inputs whose last-used values are remembered between runs."""
     keys = [f"capacity_{i}" for i in range(N_OPS)] + [f"sides_{i}" for i in range(N_OPS)]
     keys += [f"wip_cap_{i}" for i in range(N_OPS)]
-    keys += ["starting_inventory", "simulation_years", "supply_reliability", "demand_variable",
+    keys += ["starting_inventory", "simulation_years", "horizon", "supply_reliability", "demand_variable",
              "demand_dice", "demand_faces", "wip_limit_on", "fin_order_size"]
     keys += ["reorder_point_on", "reorder_point", "scrap_on"] + [f"scrap_pct_{i}" for i in range(N_OPS)]
     # Financials persist with the run too, so they survive reloads and only return to
@@ -777,6 +794,7 @@ def initialize_state():
         sd(f"sides_{i}", DEFAULT_SIDES[i])
     sd("starting_inventory", DEFAULT_STARTING_INVENTORY)
     sd("simulation_years", DEFAULT_SIMULATION_YEARS)
+    sd("horizon", DEFAULT_HORIZON)
     sd("supply_reliability", DEFAULT_SUPPLY_RELIABILITY)
     sd("fin_order_size", DEFAULT_ORDER_SIZE)
     sd("demand_variable", DEFAULT_DEMAND_VARIABLE)
@@ -888,6 +906,10 @@ def reset_line_to_defaults():
         st.session_state[f"scrap_pct_{i}"] = DEFAULT_SCRAP_PCT
     st.session_state["starting_inventory"] = DEFAULT_STARTING_INVENTORY
     st.session_state["simulation_years"] = DEFAULT_SIMULATION_YEARS
+    # Always back to a full year: every lab step (and every challenge) is written and tuned
+    # against the year-long horizon, so a short horizon picked for one experiment can't leak
+    # into the next step.
+    st.session_state["horizon"] = DEFAULT_HORIZON
     st.session_state["supply_reliability"] = DEFAULT_SUPPLY_RELIABILITY
     st.session_state["demand_variable"] = DEFAULT_DEMAND_VARIABLE
     st.session_state["demand_dice"] = DEFAULT_DEMAND_DICE
@@ -1032,6 +1054,9 @@ def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_li
     hourly_out, daily_out, cum_out, wip_total = [], [], [], []
     raw_series, fgi_series = [], []   # daily raw-material inbound & finished-goods inventory
     produced = [0] * n
+    # Units each station actually worked on, scrap included. `produced` counts only the good
+    # ones, so costing from it makes a scrapped bottle free — see compute_financials (audit P2).
+    worked = [0] * n
     inv_sum = [0.0] * n
     finished = 0
     # Material-balance + replenishment instrumentation (additive; draws no RNG, changes no
@@ -1133,6 +1158,7 @@ def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_li
             else:
                 finished += good
             produced[p] += good
+            worked[p] += mv
 
             # --- flow-time tokens: mirror this move on the FIFO queues. mv units leave
             #     buffers[p]; only the `good` ones advance, so scrapped tokens are dropped. ---
@@ -1215,6 +1241,7 @@ def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_li
             "min_cap": a_caps[p],
             "wip_cap": a_limits[p],
             "avg_prod": produced[p] / hours,
+            "avg_worked": worked[p] / hours,
             "avg_inv": inv_sum[p] / hours,
             "end_inv": buffers[p],
         }
@@ -1611,6 +1638,49 @@ def get_fin():
     }
 
 
+def run_hours():
+    """Hours in the next run. Short horizons let students watch the dice-game swings that a
+    full year averages out; HORIZON_YEAR is the original behaviour and the default."""
+    h = HORIZONS.get(st.session_state.get("horizon", DEFAULT_HORIZON))
+    if h is None:
+        return int(st.session_state["simulation_years"]) * HOURS_PER_YEAR
+    return int(h)
+
+
+def run_years():
+    """Run length in years (fractional for sub-year horizons) — the P&L allocates fixed cost
+    annually, so a one-week run must not be charged a year of dice."""
+    return run_hours() / HOURS_PER_YEAR
+
+
+def is_full_year_run():
+    return HORIZONS.get(st.session_state.get("horizon", DEFAULT_HORIZON)) is None
+
+
+def steady_state_note(results):
+    """Audit P3: say out loud when the averages on screen describe a line that never settled.
+
+    Two distinct causes, both worth naming rather than hiding. A short run spends a real share
+    of itself just filling the pipeline, so the average rate understates the steady rate. An
+    uncapped bottleneck never settles at all: WIP climbs for the whole run, so units still in
+    the line at the end are counted in average WIP but never in measured flow time."""
+    if not results:
+        return None
+    hours = results.get("hours", 0)
+    avg_wip = results.get("wip_L", 0.0)
+    end_wip = results.get("ending_wip_downstream", 0.0)
+    if hours and hours < HOURS_PER_DAY * 30:
+        return ("⏱️ **Short run.** The line starts empty, so part of this run is spent just "
+                "filling it — the average rate here is below the rate the same line settles at "
+                "over a year. Run it again: the swing between runs is the point.")
+    if avg_wip > 0 and end_wip > 1.5 * avg_wip:
+        return ("📈 **The line never reached steady state.** WIP was still climbing when the run "
+                "ended, so averages here describe a line in transition, not a settled one. "
+                "Units still queued at the end count in average WIP but never finished, so "
+                "measured flow time understates the true wait.")
+    return None
+
+
 def compute_financials(results, caps, sides, years, fin):
     """Turn a completed run into a profit-and-loss statement.
 
@@ -1632,8 +1702,13 @@ def compute_financials(results, caps, sides, years, fin):
     for d in results["op_detail"]:
         op = d["op_num"]
         c, s = caps[op - 1], sides[op - 1]
-        produced = d["avg_prod"] * hours
-        prod_cost += produced * _interp(s, xs, px)
+        # Audit P2: charge processing on every unit the station WORKED, not just the good ones.
+        # A bottle that is filled and then fails inspection consumed the same capacity and
+        # materials as one that passed; costing only good units made scrap free, which is the
+        # opposite of the lesson the Quality lab is teaching. `.get` keeps older saved runs
+        # (which predate avg_worked) readable.
+        worked_units = d.get("avg_worked", d["avg_prod"]) * hours
+        prod_cost += worked_units * _interp(s, xs, px)
         fixed_alloc += _interp(s, xs, fx) * c
     fixed_alloc *= (fin["alloc_pct"] / 100.0) * years
 
@@ -1645,11 +1720,24 @@ def compute_financials(results, caps, sides, years, fin):
     avg_fgi = results.get("avg_fgi", 0.0)
     fgi_cost = (avg_fgi * hours / HOURS_PER_DAY) * fin["wip_holding"]
 
-    raw_units = results["op_detail"][0]["avg_prod"] * hours    # fed into the line by op 1
+    # Audit P2: raw material is consumed by every unit Operation 1 STARTS, including the ones
+    # it then scraps — not only the ones that make it through.
+    _op1 = results["op_detail"][0]
+    raw_units = _op1.get("avg_worked", _op1["avg_prod"]) * hours
     raw_cost = raw_units * fin["rmc"]
 
+    # Audit P1: count the purchase orders the supplier actually shipped rather than inferring
+    # them as ceil(consumption / order size). The reorder policy ships whenever the raw buffer
+    # dips below the reorder point, so the real count runs a few percent above the idealised
+    # one; inferring it quietly understated ordering cost. Falls back to the old estimate for
+    # runs saved before the engine recorded it.
     osz = fin["order_size"]
-    orders = math.ceil(raw_units / osz) if osz and osz > 0 else (1 if raw_units > 0 else 0)
+    orders = results.get("orders_placed")
+    if orders is None or results.get("order_size") != max(1, int(osz or 1)):
+        # Either an older saved run with no recorded count, or a P&L being priced at a different
+        # order size than the run used — in both cases the recorded count doesn't describe this
+        # P&L, so fall back to the idealised estimate rather than reporting a mismatched number.
+        orders = math.ceil(raw_units / osz) if osz and osz > 0 else (1 if raw_units > 0 else 0)
     order_cost = orders * fin["order_cost"]
 
     total_sold = results.get("total_sold", results["total_output"])
@@ -1863,7 +1951,22 @@ def eoq_unit_margin(results, caps, sides, years, fin):
     return max(0.0, (f["revenue"] - f["prod_cost"] - f["raw_cost"]) / sold)
 
 
-@st.cache_data(ttl=3600, max_entries=512, show_spinner=False)
+@st.cache_data(ttl=3600, max_entries=4096, show_spinner=False)
+def _eoq_sim_point(caps, sides, hours, reliability, Q):
+    """One order-size point on the EOQ curve — the *simulation* aggregates only.
+
+    Keyed on the line configuration alone. The money layered on top (ordering, holding,
+    stockout) is arithmetic that depends on order cost, holding rate and unit margin, none
+    of which change how the line behaves. Keeping those out of the cache key is what lets a
+    whole class share one computation per order size: the scan used to be keyed on the
+    run-derived `margin`, so it re-ran ~11 simulations on every run for every student."""
+    r = run_simulation(caps, sides, 0, hours, reliability, order_size=Q,
+                       rng=random.Random(20260629))
+    avg_raw = sum(r["raw_series"]) / len(r["raw_series"]) if r["raw_series"] else 0.0
+    return {"avg_raw": avg_raw, "thru": r["total_output"], "starved": r["starved_hours"],
+            "orders": r["orders_placed"]}
+
+
 def compute_eoq_scan(caps, sides, hours, reliability, order_cost, margin, qs=None,
                      include_q=None, hold_per_day=None):
     """Run the line at a spread of order sizes and split the inventory-related cost into
@@ -1885,17 +1988,19 @@ def compute_eoq_scan(caps, sides, hours, reliability, order_cost, margin, qs=Non
     qs = sorted(set(q for q in qs if q >= 1))
     rows = []
     for Q in qs:
-        r = run_simulation(caps, sides, 0, hours, reliability, order_size=Q,
-                           rng=random.Random(20260629))
-        avg_raw = sum(r["raw_series"]) / len(r["raw_series"]) if r["raw_series"] else 0.0
-        orders = math.ceil(Dr / Q) if Q > 0 else 0
+        sim = _eoq_sim_point(caps, sides, hours, reliability, Q)
+        avg_raw, thru = sim["avg_raw"], sim["thru"]
+        # Audit P1: the orders the supplier actually shipped, not ceil(demand / Q). Measured a
+        # few percent above the idealised count and still ~1/Q in shape, so the textbook EOQ
+        # stays a good predictor of the curve's minimum — which is the point of the lab.
+        orders = sim.get("orders", math.ceil(Dr / Q) if Q > 0 else 0)
         ordering = orders * order_cost
         holding = avg_raw * H
-        lost = max(0, int(round(Dr)) - r["total_output"])
+        lost = max(0, int(round(Dr)) - thru)
         stockout = lost * margin
         rows.append({"Q": Q, "orders": orders, "ordering": ordering, "holding": holding,
                      "stockout": stockout, "total": ordering + holding + stockout,
-                     "avg_raw": avg_raw, "thru": r["total_output"], "starved": r["starved_hours"]})
+                     "avg_raw": avg_raw, "thru": thru, "starved": sim["starved"]})
     best = min(rows, key=lambda x: x["total"])
     return {"D": Dr, "H": H, "S": order_cost, "margin": margin, "eoq": eoq,
             "reliability": reliability, "rows": rows, "best_q": best["Q"], "best_total": best["total"]}
@@ -4478,7 +4583,7 @@ def _pl(r):
     cfg = r.get("config", {})
     dice = cfg.get("dice", [0] * N_OPS)
     sides = cfg.get("faces", [0] * N_OPS)
-    return compute_financials(r, dice, sides, int(cfg.get("years", 1) or 1), get_fin())
+    return compute_financials(r, dice, sides, float(cfg.get("years", 1) or 1), get_fin())
 
 
 def _rev_diag2_money(r):
@@ -5248,9 +5353,15 @@ def _render_challenge(prefix, i, challenge, results):
     cur = st.session_state.get("run_counter", 0)
     have = bool(results) and "config" in results
     resolved = passed or attempts >= tries
+    # Challenges are graded on the full-year horizon they were written and tuned for. A short
+    # run (one shift, one week) swings far too much for a pass/fail threshold to mean anything
+    # — over one shift a balanced line's throughput varies by ~160% run to run — so a short run
+    # is shown on the scoreboard but never consumes a try or scores a pass.
+    run_horizon = (results or {}).get("config", {}).get("horizon", HORIZON_YEAR) if have else HORIZON_YEAR
+    graded_run = HORIZONS.get(run_horizon) is None
 
     # A fresh run (while still unresolved) counts as one attempt and is scored.
-    if have and cur != seen and not resolved:
+    if have and graded_run and cur != seen and not resolved:
         st.session_state[f"{prefix}_chal_seen_{i}"] = cur
         attempts += 1
         st.session_state[f"{prefix}_chal_attempts_{i}"] = attempts
@@ -5264,6 +5375,10 @@ def _render_challenge(prefix, i, challenge, results):
     st.markdown('<div class="chal-inst">Redesign the line with the controls in the sidebar, then press '
                 '<b>▶ Run this line</b> in the 🚀 Run card. Each run is one try.</div>',
                 unsafe_allow_html=True)
+    if have and not graded_run:
+        st.info(f"That run was **{run_horizon}**, so it didn't use a try. Short runs are great "
+                "for *seeing* variability, but they're too noisy to judge a design on — set "
+                f"**Run length** back to **{HORIZON_YEAR}** in the sidebar to take a scored try.")
 
     rows = []
     for t in challenge["targets"]:
@@ -5300,8 +5415,24 @@ def _render_challenge(prefix, i, challenge, results):
     return resolved
 
 
+def _lab_nav_cb(fn, *args):
+    """Button callback inside the lab fragment.
+
+    Do the work, then ask for a full-app rerun. The panel itself is a fragment so that
+    answering a question (radio, estimate, reflection) redraws only the panel instead of
+    re-executing the whole script — but navigation, "set up & run" and the sidebar-focus
+    jump all change things that live *outside* the fragment (the sidebar's configuration,
+    the dashboard, the scroll anchor), so those have to escalate to an app-wide rerun."""
+    fn(*args)
+    st.session_state["_lab_frag_app_rerun"] = True
+
+
+@st.fragment
 def render_lab(results, prefix):
     """Directed exercise panel: predict → run → reveal, gated on answering."""
+    # Set only by _lab_nav_cb, so an ordinary app rerun can never trip it (which would loop).
+    if st.session_state.pop("_lab_frag_app_rerun", False):
+        st.rerun(scope="app")
     lab = LABS[prefix]
     steps = lab["steps"]
     i = st.session_state[f"{prefix}_step"]
@@ -5326,7 +5457,8 @@ def render_lab(results, prefix):
         st.markdown('<div id="jcc-runtop" style="scroll-margin-top: 5rem;"></div>',
                     unsafe_allow_html=True)
         st.button("🎛️  Go to the setup controls in the sidebar  ↙",
-                  key=f"{prefix}_focus_{i}", on_click=_focus_sidebar_cb, use_container_width=True)
+                  key=f"{prefix}_focus_{i}", on_click=_lab_nav_cb, args=(_focus_sidebar_cb,),
+                  use_container_width=True)
 
         # Play the "line running" animation here, inside the lab panel, after any run in this
         # lab (predict/estimate steps run from the button below; challenge steps run from the
@@ -5373,7 +5505,8 @@ def render_lab(results, prefix):
                 st.radio(f"**Predict:** {_md_escape(step['q'])}", _opts,
                          key=_pk, on_change=_on_answer_change, **_rkw)
             st.button("▶  Set up & run this step", type="primary", use_container_width=True,
-                      on_click=lab_setup_and_run, args=(prefix,), key=f"{prefix}_run_{i}")
+                      on_click=_lab_nav_cb, args=(lab_setup_and_run, prefix),
+                      key=f"{prefix}_run_{i}")
 
             matched = bool(results) and "config" in results
             if matched:
@@ -5448,13 +5581,15 @@ def render_lab(results, prefix):
         last = len(steps) - 1
         nav1, nav2, nav3 = st.columns([1, 1, 1])
         nav1.button("‹ Previous", use_container_width=True, disabled=(i == 0),
-                    on_click=lab_goto, args=(prefix, i - 1), key=f"{prefix}_prev_{i}")
+                    on_click=_lab_nav_cb, args=(lab_goto, prefix, i - 1),
+                    key=f"{prefix}_prev_{i}")
         nav2.markdown(f'<div class="lab-count">Step {i + 1} of {len(steps)}</div>',
                       unsafe_allow_html=True)
         nav3.button("Next ›", use_container_width=True,
                     type=("primary" if (answered and i != last) else "secondary"),
                     disabled=(i == last or not answered),
-                    on_click=lab_goto, args=(prefix, i + 1), key=f"{prefix}_next_{i}")
+                    on_click=_lab_nav_cb, args=(lab_goto, prefix, i + 1),
+                    key=f"{prefix}_next_{i}")
 
         if i < last:
             if not answered and _lock_msg:
@@ -5480,8 +5615,8 @@ def render_lab(results, prefix):
                         st.caption("Pick another lab from **🧭 Choose a lab** in the sidebar — or jump "
                                    "straight to the next one in this part:")
                         st.button("▸  Next lab: " + LAB_SHORT.get(nxt, nxt),
-                                  use_container_width=True, on_click=lab_go_to_lab,
-                                  args=(nxt,), key=f"{prefix}_nextlab_{i}")
+                                  use_container_width=True, on_click=_lab_nav_cb,
+                                  args=(lab_go_to_lab, nxt), key=f"{prefix}_nextlab_{i}")
                     else:
                         st.caption("Pick another lab from **🧭 Choose a lab** in the sidebar, or flip "
                                    "to **Sandbox** to test your own lines.")
@@ -5686,7 +5821,11 @@ def _lab_in(*prefixes):
     return (not IS_LAB) or (LAB_PREFIX in prefixes)
 
 
-SHOW_SANDBOX_TOOLS = not IS_LAB                       # replications, A/B pins & comparison
+SHOW_SANDBOX_TOOLS = not IS_LAB                       # A/B pins & comparison
+# Replications are available in the guided labs too, not just Sandbox. Judging a design from a
+# single run is the mistake the dice game exists to cure, and the Variability lab in particular
+# is unteachable without a distribution: one run gives a number, many runs give the process.
+SHOW_REPS = True
 # Inputs (sidebar cards / sub-controls)
 SHOW_WIP      = _lab_in("ops", "little", "pull", "diag")
 SHOW_SUPPLY   = _lab_in("var", "ss", "diag", "diag2")           # supplier reliability
@@ -6388,7 +6527,15 @@ with st.sidebar:
                 min_value=0, max_value=99999, step=1, key="starting_inventory",
                 help="How many bottles are already waiting in front of each station when the clock "
                      "starts. 0 reproduces the textbook empty-line case.")
-        if SHOW_YEARS:
+        st.selectbox(
+            "Run length", options=list(HORIZONS.keys()), key="horizon",
+            help="How long the line runs. A full year averages the dice out and shows the "
+                 "line's steady rate; a shift or a week shows the swings a real shop floor "
+                 "lives with — the same line, seen up close.")
+        if not is_full_year_run():
+            st.caption("⏱️ Short run: expect big swings between runs, and a slow start while the "
+                       "line fills up. Challenges are still judged over a full year.")
+        if SHOW_YEARS and is_full_year_run():
             st.number_input(
                 "Years to simulate (1–5)",
                 min_value=1, max_value=MAX_YEARS, step=1, key="simulation_years",
@@ -6561,7 +6708,7 @@ with st.sidebar:
                 f"{float(st.session_state['fin_alloc_pct']):g}% allocation · "
                 f"${float(st.session_state['fin_wip_holding']):.2f}/bottle/day WIP")
 
-    # ---- Run / actions (both modes; replications are Sandbox only) ----
+    # ---- Run / actions (both modes, replications included) ----
     with st.container(border=True, key="actions_card"):
         st.markdown('<div class="card-title">🚀 Run</div>', unsafe_allow_html=True)
         caps_now = [int(st.session_state[f"capacity_{i}"]) for i in range(N_OPS)]
@@ -6573,13 +6720,17 @@ with st.sidebar:
         if is_lab:
             st.caption("Re-runs the line as currently configured — handy after you tweak a control "
                        "to test your own \"what if\".")
-        if not is_lab:
-            st.number_input("Replications (run many years)", min_value=2, max_value=100, step=1,
-                            key="n_reps",
+        if SHOW_REPS:
+            st.number_input("Replications (run the line many times)", min_value=2, max_value=100,
+                            step=1, key="n_reps",
                             help="Run the same line this many times to see the spread of outcomes. "
-                                 "Each replication is one simulated horizon with fresh randomness.")
+                                 "Each replication is one run of the chosen length with fresh "
+                                 "randomness. One run is a sample; the spread is the process.")
             reps_clicked = st.button(f"🎲  Run {int(st.session_state['n_reps'])} replications",
                                      use_container_width=True, disabled=bool(errs_now))
+            if is_lab:
+                st.caption("Use this when you want to know whether a difference you're seeing is "
+                           "real or just the dice. Replications never count as a challenge try.")
         st.button("↺ Reset to defaults", use_container_width=True, on_click=reset_defaults)
 
     # ---- Plain-English glossary (both modes) ----
@@ -6754,7 +6905,7 @@ if st.session_state.pop("lab_autorun", False):
 if st.session_state.pop("_main_run", False):
     run_clicked = True
 if run_clicked and not errs:
-    sim_hours = int(st.session_state["simulation_years"]) * HOURS_PER_YEAR
+    sim_hours = run_hours()
     if st.session_state["wip_limit_on"]:
         wip_limits = [int(st.session_state[f"wip_cap_{i}"]) for i in range(N_OPS)]
     else:
@@ -6788,7 +6939,7 @@ if run_clicked and not errs:
             # EOQ labs, the money capstone, and Sandbox show the inventory cost-vs-order-size curve.
             _eoq_fin = get_fin()
             _eoq_margin = eoq_unit_margin(
-                full, caps, sides, int(st.session_state["simulation_years"]), _eoq_fin)
+                full, caps, sides, run_years(), _eoq_fin)
             full["eoq_scan"] = compute_eoq_scan(
                 caps, sides, sim_hours, SUPPLY_REL,
                 float(_eoq_fin["order_cost"]), _eoq_margin,
@@ -6823,7 +6974,8 @@ if run_clicked and not errs:
             "scrap_on": bool(st.session_state.get("scrap_on")),
             "scrap_pct": ([int(st.session_state.get(f"scrap_pct_{i}", 0)) for i in range(N_OPS)]
                           if st.session_state.get("scrap_on") else None),
-            "years": int(st.session_state["simulation_years"]),
+            "years": run_years(),
+            "horizon": st.session_state.get("horizon", DEFAULT_HORIZON),
         }
     delay = SPEED_DELAY.get(st.session_state["anim_speed"], 0.03)
     if st.session_state.get("animate", True) and full and delay > 0 and full["frames"]:
@@ -6855,7 +7007,7 @@ if run_clicked and not errs:
 
 # ---- Replications trigger: run the line many times, collect the spread ----
 if reps_clicked and not errs:
-    sim_hours = int(st.session_state["simulation_years"]) * HOURS_PER_YEAR
+    sim_hours = run_hours()
     if st.session_state["wip_limit_on"]:
         wip_limits = [int(st.session_state[f"wip_cap_{i}"]) for i in range(N_OPS)]
     else:
@@ -6869,7 +7021,7 @@ if reps_clicked and not errs:
         sim_hours,
         SUPPLY_REL,
         wip_limits,
-        int(st.session_state["simulation_years"]),
+        run_years(),
         get_fin(),
         n_reps,
         progress=lambda k, n: prog.progress(k / n, text=f"Replication {k} of {n}…"),
@@ -6886,7 +7038,8 @@ if reps_clicked and not errs:
             "supply_reliability": int(st.session_state["supply_reliability"]),
             "demand_variable": bool(st.session_state["demand_variable"]),
             "wip_on": bool(st.session_state["wip_limit_on"]),
-            "years": int(st.session_state["simulation_years"]),
+            "years": run_years(),
+            "horizon": st.session_state.get("horizon", DEFAULT_HORIZON),
         },
     }
     st.session_state["rep_results"] = rep
@@ -6953,6 +7106,10 @@ else:
         cap_msg += (" WIP is capped per station, so a full downstream buffer can block an upstream "
                     "station — throughput is held down by the tightest cap as well as the constraint.")
     st.caption(cap_msg)
+
+    _ss = steady_state_note(results)
+    if _ss:
+        st.info(_ss)
 
     # Charts are the heaviest thing to draw and redraw every interaction, so they're OFF by
     # default. A prominent switch (contextually placed with the results) turns them on. SHOW_CHARTS
@@ -7177,7 +7334,7 @@ else:
         # ---- Financial results: profit & loss for this run ----
         fin = get_fin()
         fr = compute_financials(results, caps, sides,
-                                int(st.session_state["simulation_years"]), fin)
+                                run_years(), fin)
         with st.container(border=True, key="finresult_card"):
             st.markdown('<div class="card-title">💵 Financial results</div>', unsafe_allow_html=True)
             st.markdown('<div class="card-sub">Profit and loss for this run, using the figures in '
@@ -7213,7 +7370,7 @@ else:
                     {"faces": e["faces"],
                      "profit": compute_financials(
                          e["res"], caps, e["sides"],
-                         int(st.session_state["simulation_years"]), fin)["profit"]}
+                         run_years(), fin)["profit"]}
                     for e in scan
                 ]
                 act_sides = [s for c, s in zip(caps, sides) if c > 0 and s > 0]
@@ -7230,7 +7387,8 @@ else:
                 st.html(build_profit_curve_html(curve, current_faces))
                 st.caption(f"Most profitable uniform die here: {best['faces']}-sided "
                            f"(≈ ${best['profit']:,.0f}/yr). Curve is computed at your current dice count, "
-                           f"starting inventory, supply mode, and {int(st.session_state['simulation_years'])}-year "
+                           f"starting inventory, supply mode, and "
+                           f"{st.session_state.get('horizon', DEFAULT_HORIZON).lower()} "
                            f"horizon; it updates instantly when you change the financials.")
 
     if SHOW_SANDBOX_TOOLS:
@@ -7249,14 +7407,17 @@ else:
 # Replications — distribution of outcomes (independent of a single run)
 # =========================================================
 rep = st.session_state.get("rep_results")
-if SHOW_SANDBOX_TOOLS and rep and rep.get("profit"):
+if SHOW_REPS and rep and rep.get("profit"):
     with st.container(border=True, key="rep_card"):
         n = rep["meta"]["n"]
-        st.markdown(f'<div class="card-title">🎲 Distribution across {n} replications</div>',
-                    unsafe_allow_html=True)
-        st.markdown('<div class="card-sub">One run is a single noisy sample. Across many simulated '
-                    'years the spread <i>is</i> the business risk — a thin average profit can hide '
-                    'plenty of losing years.</div>', unsafe_allow_html=True)
+        _rep_h = rep["meta"]["config"].get("horizon", HORIZON_YEAR)
+        st.markdown(f'<div class="card-title">🎲 Distribution across {n} replications '
+                    f'({_rep_h.lower()} each)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card-sub">One run is a single noisy sample. Across many runs the '
+                    'spread <i>is</i> the business risk — a thin average profit can hide plenty of '
+                    'losing periods. Compare the spread here with the single number the dashboard '
+                    'showed: judging a design from one run is the mistake this game exists to '
+                    'cure.</div>', unsafe_allow_html=True)
 
         prof = rep["profit"]
         sp = _stat_block(prof)

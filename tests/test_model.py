@@ -294,6 +294,79 @@ def test_private_rng_is_isolated_and_equivalent():
     assert r1["total_output"] == r2["total_output"] == legacy
 
 
+def _fin(order_size=150.0, rmc=0.55, order_cost=25.0):
+    """A financial settings dict shaped like get_fin()'s output, built from the app's defaults."""
+    import pandas as pd
+    return {
+        "revenue_per_unit": 3.0, "alloc_pct": 33.0, "wip_holding": 0.04, "rmc": rmc,
+        "order_cost": order_cost, "order_size": float(order_size), "raw_holding": 0.04,
+        "table": pd.DataFrame({
+            "Faces": list(APP.FACE_ROWS),
+            "Fixed cost per die ($)": [APP.DEFAULT_FIN_LOOKUP[f][0] for f in APP.FACE_ROWS],
+            "Production cost per unit ($)": [APP.DEFAULT_FIN_LOOKUP[f][1] for f in APP.FACE_ROWS],
+        }),
+    }
+
+
+def test_worked_units_are_recorded_separately_from_good():
+    """Audit P2 instrumentation: a station's worked count includes the units it scrapped."""
+    clean = _run([1, 1, 1], [6, 6, 6], seed=3)
+    for d in clean["op_detail"]:
+        assert abs(d["avg_worked"] - d["avg_prod"]) < 1e-9      # no scrap => identical
+    scrapped = _run([1, 1, 1], [6, 6, 6], seed=3, scrap=[0.25, 0, 0] + [0] * (N - 3))
+    op1 = scrapped["op_detail"][0]
+    assert op1["avg_worked"] > op1["avg_prod"]
+    worked = op1["avg_worked"] * scrapped["hours"]
+    good = op1["avg_prod"] * scrapped["hours"]
+    assert abs((worked - good) - scrapped["scrap_by_station"][0]) < 1.0
+
+
+def test_scrapped_units_are_not_free():
+    """Audit P2: raw material and processing are charged on units STARTED/WORKED, so turning
+    scrap on must raise cost — previously a scrapped bottle cost nothing."""
+    fin = _fin()
+    caps, sides = _pad([1, 1, 1]), _pad([6, 6, 6])
+    clean = _run([1, 1, 1], [6, 6, 6], seed=3, order_size=150)
+    dirty = _run([1, 1, 1], [6, 6, 6], seed=3, order_size=150,
+                 scrap=[0.25, 0, 0] + [0] * (N - 3))
+    f_clean = APP.compute_financials(clean, caps, sides, 1.0, fin)
+    f_dirty = APP.compute_financials(dirty, caps, sides, 1.0, fin)
+    assert dirty["total_output"] < clean["total_output"]        # scrap costs output ...
+    assert f_dirty["raw_cost"] >= f_clean["raw_cost"] - 1e-6    # ... and is still paid for
+    assert f_dirty["profit"] < f_clean["profit"]
+
+
+def test_ordering_cost_counts_actual_shipments():
+    """Audit P1: ordering cost comes from the orders the supplier really shipped, and falls
+    back to the idealised estimate when the P&L is priced at a different order size."""
+    caps, sides = _pad([1] * 6), _pad([6] * 6)
+    r = _run([1] * 6, [6] * 6, seed=5, order_size=600, hours=H)
+    f = APP.compute_financials(r, caps, sides, 1.0, _fin(order_size=600))
+    assert f["orders"] == r["orders_placed"]
+    # Priced at an order size the run never used -> must not report the recorded count.
+    mismatched = APP.compute_financials(r, caps, sides, 1.0, _fin(order_size=150))
+    assert mismatched["orders"] != r["orders_placed"]
+
+
+def test_short_horizons_are_shorter_and_noisier():
+    """The run-length presets exist so students can see the dice-game swings a full year
+    averages away. A one-shift run must be both short and far more variable."""
+    assert APP.HORIZONS[APP.HORIZON_YEAR] is None
+    shift = APP.HORIZONS["One shift (8 h)"]
+    assert shift == APP.HOURS_PER_DAY
+    rates = []
+    for seed in range(40):
+        r = APP.run_simulation(_pad([1] * 6), _pad([6] * 6), 0, shift, 1.0, None,
+                               track_flow=False, rng=random.Random(seed))
+        assert r["hours"] == shift
+        rates.append(r["total_output"] / shift)
+    year = [APP.run_simulation(_pad([1] * 6), _pad([6] * 6), 0, H, 1.0, None,
+                               track_flow=False, rng=random.Random(seed))["total_output"] / H
+            for seed in range(10)]
+    spread = lambda v: (max(v) - min(v)) / (sum(v) / len(v))
+    assert spread(rates) > 5 * spread(year)
+
+
 # --------------------------------------------------------------------------------------
 # Plain-python runner (so the suite works without pytest installed).
 # --------------------------------------------------------------------------------------
