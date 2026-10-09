@@ -1,4 +1,8 @@
-streamlit>=1.30
+# The app uses st.fragment and st.rerun(scope="app") (the guided-lab panel), st.dialog,
+# st.html and keyed st.container — all far newer than the >=1.30 this file used to declare,
+# which would have let a resolver install a Streamlit that crashes on import. 1.50 is the
+# release V3 was built and load-tested against.
+streamlit>=1.50
 pandas>=2.0
 
 # Per-student persistence (student_store.py). Required once storage secrets
