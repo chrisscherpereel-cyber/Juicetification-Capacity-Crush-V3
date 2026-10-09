@@ -1,4 +1,4 @@
-# manifest.py — parameter schema for Capacity Crush (app_key "toc").
+# manifest.py — parameter schema for Capacity Crush V3 (app_key "toc3").
 # The Juicetification Director reads this (via ?manifest=1) to build the instructor
 # config UI. Nothing here is imported by the Director itself; it is served on request.
 #
@@ -8,8 +8,11 @@
 # matching scalars. juicetification.py translates the four aggregate keys into per-station
 # keys on load (_director_to_snapshot); every other key here matches a snapshot key 1:1.
 
-APP_KEY = "toc"
-NAME = "Capacity Crush"
+# V3 is registered in the Director as its own catalog entry ("toc3") rather than replacing
+# "toc", so games and configurations authored against the earlier Capacity Crush keep
+# launching the app they were written for.
+APP_KEY = "toc3"
+NAME = "Capacity Crush V3"
 SCHEMA_VERSION = 1
 
 MANIFEST = {
@@ -20,6 +23,12 @@ MANIFEST = {
         "sides":       {"type": "list", "default": [6, 6, 6, 6, 6, 6, 0, 0, 0], "group": "Line", "label": "Faces per station"},
         "starting_inventory": {"type": "int", "default": 0, "min": 0, "group": "Line", "label": "Starting inventory"},
         "simulation_years":   {"type": "int", "default": 1, "min": 1, "max": 5, "group": "Line", "label": "Years to simulate"},
+        # New in V3. Maps 1:1 to the `horizon` session key, so _director_to_snapshot needs no
+        # special case. Challenges are judged over a full year whatever this is set to.
+        "horizon":            {"type": "str", "default": "Full year",
+                               "choices": ["One shift (8 h)", "One week (40 h)",
+                                           "Six weeks (240 h)", "Full year"],
+                               "group": "Line", "label": "Run length"},
         "wip_limit_on":       {"type": "bool", "default": False, "group": "Line", "label": "Cap WIP per station"},
         "wip_cap":            {"type": "int", "default": 10, "min": 0, "max": 99999, "group": "Line", "label": "WIP cap when on"},
         "supply_reliability": {"type": "int", "default": 100, "min": 0, "max": 100, "group": "Variability", "label": "Supplier reliability %"},
