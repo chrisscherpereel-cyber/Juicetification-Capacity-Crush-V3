@@ -120,16 +120,17 @@ DEFAULT_HORIZON = HORIZON_YEAR
 
 CAP_MIN, CAP_MAX = 0, 20
 
-# Whether the live "line running" playback is ON by default. Each user can flip it in the
-# sidebar, but an instructor expecting many simultaneous users can turn it OFF for everyone
-# by setting the environment variable JCC_ANIMATIONS=off (the playback is the main per-run
-# server cost: it holds the session for a couple of seconds and streams ~240 frames).
+# Whether the live "line running" playback is on by default. It is OFF, because the playback is
+# the single biggest per-run server cost: it holds the session thread for the length of the
+# animation and streams a frame at a time (capped at MAX_ANIM_FRAMES, currently 90). Each user
+# can switch it on in the sidebar; an instructor who wants it on for everyone sets the
+# environment variable JCC_ANIMATIONS=on.
 ANIMATIONS_DEFAULT_ON = os.environ.get("JCC_ANIMATIONS", "off").strip().lower() in (
     "1", "on", "true", "yes", "enable", "enabled")
 # Charts (the line/bar charts and cost-curve pictures) are the heaviest thing to render and
-# re-render on every interaction. They're ON by default, but a student can switch them off to
-# keep just the numbers, and an instructor can default the whole class to OFF with
-# JCC_CHARTS=off to cut server/bandwidth load on Streamlit Cloud's single CPU.
+# re-render on every interaction, so they are OFF by default. A student can switch them on from
+# the toggle beside the results; an instructor who wants them on for the whole class sets
+# JCC_CHARTS=on. Leaving them off is what keeps the app light on Streamlit Cloud's single CPU.
 CHARTS_DEFAULT_ON = os.environ.get("JCC_CHARTS", "off").strip().lower() in (
     "1", "on", "true", "yes", "enable", "enabled")
 SIDES_MIN, SIDES_MAX = 0, 100
@@ -6543,9 +6544,10 @@ with st.sidebar:
                      f"{HOURS_PER_YEAR:,} dice rolls per operation.")
         st.checkbox(
             "Play the run animation", key="animate",
-            help="Plays the line back day by day when you press Run. Uncheck for a faster, lighter "
-                 "run that jumps straight to the results — recommended when many people are using the "
-                 "app at the same time.")
+            help="Plays the line back day by day when you press Run. Off by default: the playback "
+                 "holds the server for the length of the animation, so leaving it off keeps things "
+                 "quick when many people are using the app at the same time. Switch it on when you "
+                 "want to watch the line fill and drain.")
         if st.session_state.get("animate", True):
             st.select_slider(
                 "Playback speed",
