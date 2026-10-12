@@ -127,11 +127,15 @@ CAP_MIN, CAP_MAX = 0, 20
 # environment variable JCC_ANIMATIONS=on.
 ANIMATIONS_DEFAULT_ON = os.environ.get("JCC_ANIMATIONS", "off").strip().lower() in (
     "1", "on", "true", "yes", "enable", "enabled")
-# Charts (the line/bar charts and cost-curve pictures) are the heaviest thing to render and
-# re-render on every interaction, so they are OFF by default. A student can switch them on from
-# the toggle beside the results; an instructor who wants them on for the whole class sets
-# JCC_CHARTS=on. Leaving them off is what keeps the app light on Streamlit Cloud's single CPU.
-CHARTS_DEFAULT_ON = os.environ.get("JCC_CHARTS", "off").strip().lower() in (
+# Charts (the line/bar charts and cost-curve pictures) are ON by default. They used to be off
+# because they were by far the most expensive thing the app rendered: on Streamlit Cloud with 35
+# concurrent students, switching them on took a Run click from 1.5 s to 20.2 s and an ordinary
+# rerun to 14.2 s. Since they became downsampled inline SVG (see build_line_chart_html) that cost
+# is gone -- re-measured under the same 35-student load, a Run with charts on is 1.2 s against
+# 1.1 s with them off, and a rerun is 0.4 s. The difference is inside the noise, so there is no
+# longer a performance reason to hide them. A student can still switch them off from the toggle
+# beside the results, and an instructor can default the class back to off with JCC_CHARTS=off.
+CHARTS_DEFAULT_ON = os.environ.get("JCC_CHARTS", "on").strip().lower() in (
     "1", "on", "true", "yes", "enable", "enabled")
 SIDES_MIN, SIDES_MAX = 0, 100
 
@@ -7289,12 +7293,12 @@ else:
         _tc1, _tc2 = st.columns([0.62, 0.38])
         with _tc1:
             st.markdown('<div class="charts-toggle-lead">📊 <b>Charts &amp; graphs</b><br>'
-                        '<span>Line/bar charts and the cost-curve pictures. Off by default to keep the '
-                        'app fast for everyone; flip the switch to see them.</span></div>',
+                        '<span>Line/bar charts and the cost-curve pictures, drawn for every run. '
+                        'Switch them off if you would rather read just the numbers.</span></div>',
                         unsafe_allow_html=True)
         with _tc2:
             st.toggle("Show charts", key="show_charts",
-                      help="Turn on to draw the graphs for this run. The numbers, tables and the "
+                      help="Draw the graphs for this run. The numbers, tables and the "
                            "per-operation panel always show either way.")
     if not SHOW_CHARTS:
         st.markdown('<div class="charts-off-note">📊 Charts are <b>off</b> — the numbers and the '
