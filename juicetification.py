@@ -1401,6 +1401,175 @@ def sparkline(values, color="#ea580c", fill="rgba(234,88,12,0.12)", width=260, h
             f'stroke-linejoin="round" stroke-linecap="round"/></svg>')
 
 
+def _h(t):
+    """Minimal HTML escape for text placed inside the inline-SVG charts."""
+    return (str(t).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _chart_data(data):
+    """Normalise a one-column DataFrame or a Series into (label, x labels, y values)."""
+    if hasattr(data, "columns"):
+        col = data.columns[0]
+        series, label = data[col], str(col)
+    else:
+        series, label = data, str(getattr(data, "name", "") or "")
+    return label, [str(i) for i in series.index.tolist()], [float(v) for v in series.tolist()]
+
+
+def _nice_num(v):
+    """Compact axis/label number: 1.2M, 12k, 1,234, 3.5."""
+    a = abs(v)
+    if a >= 1_000_000:
+        return f"{v / 1_000_000:.1f}M"
+    if a >= 10_000:
+        return f"{v / 1000:.1f}k"
+    if a >= 10:
+        return f"{v:,.0f}"
+    if a >= 1:
+        return f"{v:,.1f}"
+    return f"{v:,.2f}"
+
+
+# Inline-SVG replacements for st.line_chart / st.bar_chart.
+#
+# The native charts are the single most expensive thing the app can render: each one converts a
+# DataFrame to Arrow and ships a Vega-Lite spec, and they re-render on *every* interaction once
+# results exist. Measured on Streamlit Cloud with 35 concurrent students, switching charts on took
+# a Run from 1.5 s to 20.2 s and an ordinary rerun to 14.2 s. The data behind them is tiny (262
+# daily points, ~24 KB total), so the cost is the machinery, not the payload — which is what makes
+# hand-built SVG worth it. The app already renders its EOQ and profit curves this way.
+#
+# Tradeoff: these have no per-point hover tooltip. Instead each chart states its own min / max /
+# latest value, which is the reading a student actually needs.
+_CHART_W = 720          # viewBox width; the SVG scales to its container
+_PAD_L, _PAD_R, _PAD_T, _PAD_B = 54, 12, 12, 26
+# A year is 262 daily points but the plot is only ~650px wide, so more than ~180 points cannot
+# be seen and just costs bytes and formatting time. Downsampling with min/max per bucket keeps
+# spikes visible — dropping every other point would hide them.
+_CHART_MAX_PTS = 180
+
+
+def _downsample(ys, limit=_CHART_MAX_PTS):
+    """Reduce a series to at most `limit` points, keeping each bucket's min and max so that
+    peaks and troughs survive. Returns (indices, values) into the original series."""
+    n = len(ys)
+    if n <= limit:
+        return list(range(n)), list(ys)
+    buckets = max(1, limit // 2)
+    width = n / buckets
+    idx = []
+    for b in range(buckets):
+        lo_i, hi_i = int(b * width), min(n, int((b + 1) * width))
+        if hi_i <= lo_i:
+            continue
+        seg = range(lo_i, hi_i)
+        mn = min(seg, key=lambda i: ys[i])
+        mx = max(seg, key=lambda i: ys[i])
+        idx.extend(sorted({lo_i, mn, mx}))
+    idx = sorted(set(idx + [n - 1]))
+    return idx, [ys[i] for i in idx]
+
+
+def build_line_chart_html(data, color="#ea580c", height=240, fill=None, x_title="Day"):
+    """Inline-SVG line chart over a numeric index — the replacement for st.line_chart."""
+    label, xs, ys = _chart_data(data)
+    if not ys:
+        return ""
+    if fill is None:
+        fill = color.replace("#", "")
+        fill = f"rgba({int(fill[0:2], 16)},{int(fill[2:4], 16)},{int(fill[4:6], 16)},0.10)"
+    H = height
+    pw, ph = _CHART_W - _PAD_L - _PAD_R, H - _PAD_T - _PAD_B
+    lo, hi = min(ys), max(ys)
+    if hi == lo:
+        hi = lo + 1
+    base = min(lo, 0.0) if lo >= 0 else lo        # anchor the area to zero when the data is positive
+    span = (hi - base) or 1
+    n = len(ys)
+
+    def px(i):
+        return _PAD_L + (i / (n - 1) * pw if n > 1 else pw / 2)
+
+    def py(v):
+        return _PAD_T + ph - (v - base) / span * ph
+
+    # Integer coordinates: the SVG is ~720 units wide, so sub-pixel precision is invisible and
+    # each decimal is pure payload repeated once per point.
+    keep_i, keep_v = _downsample(ys)
+    pts = " ".join(f"{px(i):.0f},{py(v):.0f}" for i, v in zip(keep_i, keep_v))
+    area = f"{px(0):.0f},{py(base):.0f} {pts} {px(n - 1):.0f},{py(base):.0f}"
+    grid = []
+    for frac in (0, 0.25, 0.5, 0.75, 1.0):
+        v = base + span * frac
+        y = py(v)
+        grid.append(f'<line x1="{_PAD_L}" y1="{y:.1f}" x2="{_CHART_W - _PAD_R}" y2="{y:.1f}" '
+                    f'stroke="#e5e7eb" stroke-width="1"/>')
+        grid.append(f'<text x="{_PAD_L - 6}" y="{y + 3.5:.1f}" text-anchor="end" font-size="11" '
+                    f'fill="#667085">{_h(_nice_num(v))}</text>')
+    ticks = []
+    for i in (0, n // 2, n - 1) if n > 2 else (0, n - 1):
+        ticks.append(f'<text x="{px(i):.1f}" y="{H - 8}" text-anchor="middle" font-size="11" '
+                     f'fill="#667085">{_h(xs[i])}</text>')
+    span_txt = f'{x_title} {xs[0]}–{xs[-1]}' if x_title and n > 1 else ''
+    stats = f'min {_nice_num(lo)} · max {_nice_num(hi)} · latest {_nice_num(ys[-1])}'
+    cap = ' · '.join(x for x in (label, span_txt, stats) if x)
+    return (
+        f'<div style="font-family:Inter,sans-serif">'
+        f'<svg viewBox="0 0 {_CHART_W} {H}" preserveAspectRatio="none" role="img" '
+        f'aria-label="{_h(cap)}" style="width:100%;height:{H}px;display:block">'
+        f'<title>{_h(cap)}</title>{"".join(grid)}'
+        f'<polygon points="{area}" fill="{fill}"/>'
+        f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2" '
+        f'stroke-linejoin="round" stroke-linecap="round"/>'
+        f'{"".join(ticks)}</svg>'
+        f'<div style="color:#667085;font-size:0.80rem;margin-top:2px">{_h(cap)}</div></div>')
+
+
+def build_bar_chart_html(data, color="#ea580c", height=220, value_fmt=None, x_title=""):
+    """Inline-SVG bar chart over a categorical index — the replacement for st.bar_chart."""
+    label, xs, ys = _chart_data(data)
+    if not ys:
+        return ""
+    fmt = value_fmt or _nice_num
+    H = height
+    pw, ph = _CHART_W - _PAD_L - _PAD_R, H - _PAD_T - _PAD_B
+    hi = max(max(ys), 0.0) or 1
+    n = len(ys)
+    slot = pw / n
+    bw = max(2.0, min(slot * 0.72, 46.0))
+    grid = []
+    for frac in (0, 0.5, 1.0):
+        v = hi * frac
+        y = _PAD_T + ph - frac * ph
+        grid.append(f'<line x1="{_PAD_L}" y1="{y:.1f}" x2="{_CHART_W - _PAD_R}" y2="{y:.1f}" '
+                    f'stroke="#e5e7eb" stroke-width="1"/>')
+        grid.append(f'<text x="{_PAD_L - 6}" y="{y + 3.5:.1f}" text-anchor="end" font-size="11" '
+                    f'fill="#667085">{_h(fmt(v))}</text>')
+    bars, labels = [], []
+    # With many bars (histograms) per-bar text turns to mush, so label only a few.
+    every = 1 if n <= 8 else max(1, n // 6)
+    for i, v in enumerate(ys):
+        cx = _PAD_L + slot * (i + 0.5)
+        bh = max(1.0, (max(v, 0.0) / hi) * ph)
+        y = _PAD_T + ph - bh
+        bars.append(f'<rect x="{cx - bw / 2:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{bh:.1f}" '
+                    f'rx="3" fill="{color}"><title>{_h(xs[i])}: {_h(fmt(v))}</title></rect>')
+        if n <= 8:
+            bars.append(f'<text x="{cx:.1f}" y="{y - 4:.1f}" text-anchor="middle" font-size="11" '
+                        f'fill="#1f2a44">{_h(fmt(v))}</text>')
+        if i % every == 0 or i == n - 1:
+            labels.append(f'<text x="{cx:.1f}" y="{H - 8}" text-anchor="middle" font-size="11" '
+                          f'fill="#667085">{_h(xs[i])}</text>')
+    cap = ' · '.join(x for x in (label, x_title, f'max {fmt(max(ys))}') if x)
+    return (
+        f'<div style="font-family:Inter,sans-serif">'
+        f'<svg viewBox="0 0 {_CHART_W} {H}" role="img" aria-label="{_h(cap)}" '
+        f'style="width:100%;height:{H}px;display:block">'
+        f'<title>{_h(cap)}</title>{"".join(grid)}{"".join(bars)}{"".join(labels)}</svg>'
+        f'<div style="color:#667085;font-size:0.80rem;margin-top:2px">{_h(cap)}</div></div>')
+
+
 def dual_sparkline(a, b, color_a="#0ea5e9", color_b="#9333ea", width=260, height=70):
     """Two inline-SVG lines on a shared scale — raw-material vs finished-goods inventory."""
     series = [s for s in (a, b) if s]
@@ -7179,21 +7348,23 @@ else:
         if SHOW_CHARTS:
             with st.container(border=True, key="results_card"):
                 st.markdown('<div class="card-title">Cumulative bottles finished</div>', unsafe_allow_html=True)
-                st.line_chart(results["df_cum"], height=240)
+                st.html(build_line_chart_html(results["df_cum"], height=240))
 
                 cc1, cc2 = st.columns(2)
                 with cc1:
                     st.markdown('<div class="card-title">Total WIP over time</div>', unsafe_allow_html=True)
-                    st.line_chart(results["df_wip"], height=220)
+                    st.html(build_line_chart_html(results["df_wip"], height=220,
+                                                 color="#0f766e"))
                 with cc2:
                     st.markdown('<div class="card-title">Ending WIP by station</div>', unsafe_allow_html=True)
                     if len(results["df_end"]) > 0:
-                        st.bar_chart(results["df_end"], height=220)
+                        st.html(build_bar_chart_html(results["df_end"], height=220,
+                                                    x_title="Station"))
                     else:
                         st.info("Single-station line — no inter-station WIP.")
 
             with st.expander("Bottles finished each day"):
-                st.line_chart(results["df_daily"], height=220)
+                st.html(build_line_chart_html(results["df_daily"], height=220))
 
     # ---- Inventory at the ends of the line — raw material and finished goods on
     #      their own charts (raw always; finished goods only when demand fluctuates) ----
@@ -7214,7 +7385,8 @@ else:
                     f'<b>{osz:,}</b> bottles{jit}, the supplier delivers in batches that draw down as '
                     f'the line consumes them.</div>', unsafe_allow_html=True)
                 if SHOW_CHARTS:
-                    st.line_chart(results["df_raw"], height=240, color="#0ea5e9")
+                    st.html(build_line_chart_html(results["df_raw"], height=240,
+                                                 color="#0ea5e9"))
                 rc = st.columns(3)
                 rc[0].metric("Avg raw material on hand", f"{avg_raw:,.0f}")
                 rc[1].metric("Peak raw material",
@@ -7227,7 +7399,8 @@ else:
                     'goods</b> (bottled juice) piling up after the last station whenever the line '
                     'out-produces a fluctuating market.</div>', unsafe_allow_html=True)
                 if SHOW_CHARTS:
-                    st.line_chart(results["df_fgi"], height=240, color="#9333ea")
+                    st.html(build_line_chart_html(results["df_fgi"], height=240,
+                                                 color="#9333ea"))
                 fc = st.columns(3)
                 fc[0].metric("Avg finished goods", f"{results.get('avg_fgi', 0):,.0f}",
                              help="Finished bottles made but not yet sold — finished-goods inventory "
@@ -7285,7 +7458,8 @@ else:
                 st.markdown('<div class="card-sub">Spread of actual lead times — what customers '
                             'feel. A long right tail means some bottles wait far longer than the '
                             'average.</div>', unsafe_allow_html=True)
-                st.bar_chart(hist, height=220)
+                st.html(build_bar_chart_html(hist, height=220, x_title="Lead time (h)",
+                                            value_fmt=lambda v: f"{v:,.0f}"))
                 st.caption(
                     f"Lead time — fastest {results['flow_min']} h · median {results['flow_median']} h · "
                     f"90th percentile {results['flow_p90']} h · slowest {results['flow_max']} h "
@@ -7354,7 +7528,7 @@ else:
             if SHOW_CHARTS:
                 st.markdown('<div class="card-title" style="margin-top:0.8rem">Where the money goes</div>',
                             unsafe_allow_html=True)
-                st.bar_chart(
+                st.html(build_bar_chart_html(
                     pd.Series({
                         "Production": fr["prod_cost"],
                         "Fixed (dies)": fr["fixed_alloc"],
@@ -7362,8 +7536,8 @@ else:
                         "Raw material": fr["raw_cost"],
                         "Ordering": fr["order_cost"],
                     }, name="Cost ($)"),
-                    height=220,
-                )
+                    height=220, value_fmt=lambda v: f"${v:,.0f}",
+                ))
 
             # ---- Profit vs. die size: the sweet-spot curve ----
             scan = results.get("die_scan")
@@ -7435,7 +7609,8 @@ if SHOW_REPS and rep and rep.get("profit"):
                     unsafe_allow_html=True)
         hp = numeric_histogram_series(prof, name="Years")
         if SHOW_CHARTS and hp is not None:
-            st.bar_chart(hp, height=200)
+            st.html(build_bar_chart_html(hp, height=200, x_title="Profit ($)",
+                                        value_fmt=lambda v: f"{v:,.0f}"))
         st.caption(f"{pct_profit:.0f}% of the {n} simulated years turned a profit; "
                    f"the rest lost money. Break-even is $0.")
 
