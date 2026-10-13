@@ -5153,8 +5153,10 @@ LAB_CHALLENGES = {
         "apply": {**_line([1] * 6, [2] * 6), "wip_limit_on": False, "supply_reliability": 100,
                   "demand_variable": False, "starting_inventory": 0, "simulation_years": 1},
         "tries": 3,
-        "hint": "Profit peaks at a middle die size: big enough to sell real volume, small enough that the "
-                "capital doesn't eat the margin. Try dice around 6–8 faces.",
+        "hint": "Two things have to be right. Keep the dice a **middle size** (6–8 faces) so the "
+                "capital doesn't eat the margin — but one die per station tops out near $3,500, "
+                "short of the goal. Give **every station a second die** at that size and the volume "
+                "clears $4,000 comfortably.",
         "targets": [
             {"label": "Annual profit", "get": _chal_profit, "fmt": "${:,.0f}",
              "goal": "≥ $4,000", "ok": lambda r: _chal_profit(r) >= 4000},
@@ -5168,8 +5170,10 @@ LAB_CHALLENGES = {
         "apply": {**_line([3, 1, 1, 1, 1, 1], [6] * 6), "wip_limit_on": False, "supply_reliability": 100,
                   "demand_variable": False, "starting_inventory": 0, "simulation_years": 1},
         "tries": 3,
-        "hint": "A non-constraint running hard only makes inventory (Investment and Operating Expense), "
-                "not throughput. Subordinate it — slow Operation 1 back to match the line.",
+        "hint": "Start by subordinating: Operation 1 running hard only piles up Investment and "
+                "Operating Expense, so slow it back to match the line. That stops the bleed, but on "
+                "its own it only reaches about $3,500 — I has fallen, T hasn't moved. Now lift **T** "
+                "as well, by giving every station a second die; T − OE then clears $4,000.",
         "targets": [
             {"label": "Annual profit", "get": _chal_profit, "fmt": "${:,.0f}",
              "goal": "≥ $4,000", "ok": lambda r: _chal_profit(r) >= 4000},
