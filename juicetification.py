@@ -5661,23 +5661,23 @@ def _render_challenge(prefix, i, challenge, results):
 
 
 def _lab_nav_cb(fn, *args):
-    """Button callback inside the lab fragment.
-
-    Do the work, then ask for a full-app rerun. The panel itself is a fragment so that
-    answering a question (radio, estimate, reflection) redraws only the panel instead of
-    re-executing the whole script — but navigation, "set up & run" and the sidebar-focus
-    jump all change things that live *outside* the fragment (the sidebar's configuration,
-    the dashboard, the scroll anchor), so those have to escalate to an app-wide rerun."""
+    """Thin wrapper kept so the lab panel's buttons share one call shape. The panel is no
+    longer a fragment, so these callbacks already run in the app scope and need no escalation."""
     fn(*args)
-    st.session_state["_lab_frag_app_rerun"] = True
 
 
-@st.fragment
 def render_lab(results, prefix):
-    """Directed exercise panel: predict → run → reveal, gated on answering."""
-    # Set only by _lab_nav_cb, so an ordinary app rerun can never trip it (which would loop).
-    if st.session_state.pop("_lab_frag_app_rerun", False):
-        st.rerun(scope="app")
+    """Directed exercise panel: predict → run → reveal, gated on answering.
+
+    Deliberately NOT an st.fragment. It was one in an earlier V3 build, to make answering a
+    question redraw only this panel. That cost two blocking bugs: the fragment rebuilt globals
+    from a stale module scope (which shadowed the Safety-Stock reveal helper and raised
+    TypeError), and escalating to st.rerun(scope="app") from the top of the fragment meant the
+    panel's widgets were never registered on that pass, so Streamlit garbage-collected the
+    student's answer — leaving "enter your estimate above" on screen next to their own filled-in
+    estimate, with Next disabled and no way forward. Measured on Streamlit Cloud with 35
+    concurrent students, the fragment cut payload (43 KB -> 8 KB) but not latency (10.0 s ->
+    9.1 s, inside the noise), so it was not worth the correctness risk."""
     lab = LABS[prefix]
     steps = lab["steps"]
     i = st.session_state[f"{prefix}_step"]
@@ -7374,9 +7374,8 @@ else:
     st.caption(cap_msg)
 
     # NB: do not name this `_ss` — that is the Safety-Stock lab's reveal helper (def _ss(r)).
-    # Rebinding it here shadowed the function, and because render_lab is an st.fragment, a
-    # fragment-only rerun (changing an answer, Enter in an estimate, Ctrl+Enter or Save in a
-    # reflection) ran with the leftover value and raised TypeError on step["reveal"](results).
+    # Rebinding it here shadowed that function and raised TypeError in the lab panel's reveal.
+    # The guard that test_no_module_function_is_shadowed_by_script_body enforces.
     _steady_note = steady_state_note(results)
     if _steady_note:
         st.info(_steady_note)
