@@ -5122,7 +5122,8 @@ LAB_CHALLENGES = {
         "apply": {**_eoqd_apply([1] * 6, 25.0, 0.04), "fin_order_size": 10},
         "tries": 3,
         "hint": "Use EOQ = √(2·D·S ÷ H) — around 180 here. Set the order size near it — the "
-                "raw-material order size (📦, in the Variability card); the cost curve is flat, so you don't have to be exact.",
+                "raw-material order size at the top of the 📦 **Order size & its costs** card in the "
+                "sidebar; the cost curve is flat, so you don't have to be exact.",
         "targets": [
             {"label": "Ordering + holding cost", "get": lambda r: _chal_eoq_cost(r)[0], "fmt": "${:,.0f}",
              "goal": "within 10% of best", "ok": lambda r: _chal_eoq_cost(r)[0] <= _chal_eoq_cost(r)[1] * 1.10},
@@ -5136,7 +5137,8 @@ LAB_CHALLENGES = {
         "apply": _eoq_apply(10, 100),
         "tries": 3,
         "hint": "Use EOQ = √(2·D·S ÷ H) — around 180 here. Set the order size near it — the "
-                "raw-material order size (📦, in the Variability card); the cost curve is flat, so you don't have to be exact.",
+                "raw-material order size at the top of the 📦 **Order size & its costs** card in the "
+                "sidebar; the cost curve is flat, so you don't have to be exact.",
         "targets": [
             {"label": "Ordering + holding cost", "get": lambda r: _chal_eoq_cost(r)[0], "fmt": "${:,.0f}",
              "goal": "within 10% of best", "ok": lambda r: _chal_eoq_cost(r)[0] <= _chal_eoq_cost(r)[1] * 1.10},
@@ -5165,8 +5167,10 @@ LAB_CHALLENGES = {
 # make the change.
 _LAB_CHAL_FOCUS = {
     "ops": "wip_card", "little": "wip_card", "pull": "wip_card", "var": "settings_card",
-    "qual": "quality_card", "fin": "ops_card", "ta": "ops_card", "eoqd": "var_card",
-    "eoq": "var_card", "ss": "safety_card",
+    "qual": "quality_card", "fin": "ops_card", "ta": "ops_card",
+    # The EOQ labs do not render var_card at all (SHOW_EOQ moves the order-size control into
+    # eoqcost_card), so focusing it scrolled the student to a card that was not on the page.
+    "eoqd": "eoqcost_card", "eoq": "eoqcost_card", "ss": "safety_card",
 }
 for _p, _f in _LAB_CHAL_FOCUS.items():
     if _p in LAB_CHALLENGES:
@@ -7521,7 +7525,7 @@ else:
             em3.metric("Cheapest total cost", f"${scan['best_total']:,.0f}")
             if cur is not None:
                 em4.metric("Your order size", f"{cur['Q']:,}",
-                           help="The order size currently set in the Variability card.")
+                           help="The order size currently set in the sidebar.")
 
             if SHOW_CHARTS:
                 st.html(build_eoq_curve_html(scan, current_q=cur_q))
