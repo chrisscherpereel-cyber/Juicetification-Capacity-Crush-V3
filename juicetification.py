@@ -5562,6 +5562,9 @@ def _lab_html(s):
     if not isinstance(s, str):
         return s
     s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Lab text is authored with a backslash-escaped dollar so it stays safe in Streamlit
+    # markdown; inside raw HTML that backslash renders literally, so drop it here.
+    s = s.replace(chr(92) + '$', '$')
     s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
     s = re.sub(r"(?<![\w\\])\*(?!\s)(.+?)(?<!\s)\*(?![\w])", r"<i>\1</i>", s)
     return s
@@ -5634,9 +5637,9 @@ def _render_challenge(prefix, i, challenge, results):
         else:
             val, icon, cls = "—", "•", "chal-idle"
         rows.append(f'<div class="chal-row {cls}"><span class="chal-ic">{icon}</span>'
-                    f'<span class="chal-lab">{_md_escape(t["label"])}</span>'
-                    f'<span class="chal-goal">goal: {_md_escape(t["goal"])}</span>'
-                    f'<span class="chal-val">{_md_escape(val)}</span></div>')
+                    f'<span class="chal-lab">{_lab_html(t["label"])}</span>'
+                    f'<span class="chal-goal">goal: {_lab_html(t["goal"])}</span>'
+                    f'<span class="chal-val">{_lab_html(val)}</span></div>')
     st.markdown('<div class="chal-board">' + "".join(rows) + "</div>", unsafe_allow_html=True)
 
     used = min(attempts, tries)
