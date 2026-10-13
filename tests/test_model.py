@@ -367,6 +367,42 @@ def test_short_horizons_are_shorter_and_noisier():
     assert spread(rates) > 5 * spread(year)
 
 
+def test_no_module_function_is_shadowed_by_script_body():
+    """A script-body assignment must never reuse a module-level function's name.
+
+    Streamlit re-executes the whole script per interaction, so a late rebinding looks harmless
+    — the def runs again first. But `render_lab` is an st.fragment: a fragment-only rerun does
+    NOT re-execute the module, so it sees whatever the last full run left behind. That is how
+    `_ss = steady_state_note(results)` shadowed the Safety-Stock lab's `def _ss(r)` reveal
+    helper and made step["reveal"](results) raise TypeError whenever a student changed an
+    answer. Static check, because the failure only shows up in a fragment rerun.
+    """
+    import ast
+    with open(os.path.join(ROOT, "juicetification.py"), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    funcs = {n.name: n.lineno for n in tree.body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assigned = {}
+
+    def walk(stmts):
+        for node in stmts:
+            if isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    for sub in ast.walk(tgt):
+                        if isinstance(sub, ast.Name):
+                            assigned.setdefault(sub.id, []).append(node.lineno)
+            for field in ("body", "orelse", "finalbody"):
+                walk(getattr(node, field, []) or [])
+            for handler in getattr(node, "handlers", []) or []:
+                walk(handler.body)
+
+    walk(tree.body)
+    clashes = {k: (funcs[k], sorted(set(assigned[k]))) for k in set(funcs) & set(assigned)}
+    assert not clashes, (
+        "script-body assignment shadows a module-level function: "
+        + "; ".join(f"{k} (def line {d}, reassigned at {ls})" for k, (d, ls) in clashes.items()))
+
+
 # --------------------------------------------------------------------------------------
 # Plain-python runner (so the suite works without pytest installed).
 # --------------------------------------------------------------------------------------

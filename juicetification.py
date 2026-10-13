@@ -4816,7 +4816,8 @@ LAB_DIAG2 = [
         "icon": "🔧", "phase": "Case 1 — Fix",
         "title": "Fix Line P",
         "intro": "**Your task:** get the line **back into profit (net profit above $0).** Open the "
-                 "💰 Economics card and raise the price until each bottle more than pays for itself.",
+                 "💰 Economics card **in the sidebar** and raise the price until each bottle more "
+                 "than pays for itself.",
         "setup": "Start: the same line, selling at just $0.50 a bottle.",
         "apply": {**_line([1] * 6, [6] * 6), "wip_limit_on": False, "supply_reliability": 100,
                   "demand_variable": False, "starting_inventory": 0, "simulation_years": 1,
@@ -4824,8 +4825,9 @@ LAB_DIAG2 = [
                   "fin_revenue_per_unit": 0.50},
         "challenge": {
             "tries": 3, "focus": "fin_card",
-            "hint": "Open the 💰 Economics card and raise the selling price. Watch the P&L flip from red "
-                    "to black once the price clears the cost per bottle.",
+            "hint": "Open the 💰 Economics card **in the sidebar** (the 'Revenue per unit sold' box) "
+                    "and raise the selling price. Watch the P&L flip from red to black once the "
+                    "price clears the cost per bottle.",
             "targets": [
                 {"label": "Net profit", "get": lambda r: _pl(r)["profit"], "fmt": "${:,.0f}",
                  "goal": "> $0", "ok": lambda r: _pl(r)["profit"] > 0},
@@ -6870,6 +6872,26 @@ with st.sidebar:
                 else:
                     st.caption("Configure at least one operation above to set its scrap rate.")
 
+    # ---- Economics (labs that work the P&L) ----
+    # The Part 2 capstone tells students to "open the 💰 Economics card and raise the selling
+    # price", and its challenge is scored on net profit — but the only revenue control lived in
+    # the Sandbox-only Financials dialog, so in a lab the card did not exist and the challenge
+    # could not be passed at all. Same container key as the Sandbox card so the challenge's
+    # "focus": "fin_card" jump still lands on it.
+    if is_lab and SHOW_FINANCIALS:
+        with st.container(border=True, key="fin_card"):
+            st.markdown('<div class="card-title">💰 Economics</div>', unsafe_allow_html=True)
+            st.markdown('<div class="card-sub">What each bottle sells for. Raise it above the '
+                        'cost per bottle and the P&amp;L flips from red to black.</div>',
+                        unsafe_allow_html=True)
+            fin_number_input(
+                st, "Revenue per unit sold ($)", "fin_revenue_per_unit",
+                DEFAULT_REVENUE_PER_UNIT, wprefix="sb", min_value=0.0, step=0.25,
+                format="%.2f",
+                help="The price a finished bottle sells for. The P&L recomputes as soon as you "
+                     "change it — you do not have to re-run the line.")
+            st.caption(f"Now: ${float(st.session_state['fin_revenue_per_unit']):.2f} per bottle.")
+
     # ---- Financials editor (Sandbox only) ----
     if not is_lab:
         with st.container(border=True, key="fin_card"):
@@ -7282,9 +7304,13 @@ else:
                     "station — throughput is held down by the tightest cap as well as the constraint.")
     st.caption(cap_msg)
 
-    _ss = steady_state_note(results)
-    if _ss:
-        st.info(_ss)
+    # NB: do not name this `_ss` — that is the Safety-Stock lab's reveal helper (def _ss(r)).
+    # Rebinding it here shadowed the function, and because render_lab is an st.fragment, a
+    # fragment-only rerun (changing an answer, Enter in an estimate, Ctrl+Enter or Save in a
+    # reflection) ran with the leftover value and raised TypeError on step["reveal"](results).
+    _steady_note = steady_state_note(results)
+    if _steady_note:
+        st.info(_steady_note)
 
     # Charts are the heaviest thing to draw and redraw every interaction, so they're OFF by
     # default. A prominent switch (contextually placed with the results) turns them on. SHOW_CHARTS
