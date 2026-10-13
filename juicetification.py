@@ -3204,6 +3204,47 @@ def _var_year(dice, sides, rel=1.0, si=0, dd=0, df=0, seed=20260629):
                           demand_dice=dd, demand_faces=df, rng=random.Random(seed))
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _horizon_spread(dice, sides, hours, n=24):
+    """Bottles/hr across n fixed-seed runs of the same line: (min, median, max).
+
+    Private seeds and a cached result, so the figures the reveal quotes are stable and the
+    whole class shares one computation."""
+    rates = []
+    for k in range(n):
+        res = run_simulation(list(dice), list(sides), 0, hours, 1.0, None, track_flow=False,
+                             rng=random.Random(90000 + k))
+        rates.append(res["total_output"] / hours)
+    rates.sort()
+    return rates[0], rates[len(rates) // 2], rates[-1]
+
+
+def _rev_var_horizon(r):
+    """Audit P3 made visible: the same line looks wildly unstable up close and perfectly
+    predictable from far away. Numbers come from the engine, not from hard-coded text."""
+    d = tuple([1] * 6 + [0] * 3)
+    f = tuple([6] * 6 + [0] * 3)
+    lo8, md8, hi8 = _horizon_spread(d, f, HOURS_PER_DAY)
+    lo40, md40, hi40 = _horizon_spread(d, f, HOURS_PER_DAY * 5)
+    loy, mdy, hiy = _horizon_spread(d, f, HOURS_PER_YEAR, 12)
+    def _sp(lo, md, hi):
+        return ((hi - lo) / md * 100.0) if md else 0.0
+    _P = chr(10) + chr(10)
+    return ("warn", f"The same line, watched for different lengths of time. Over **one shift** it "
+            f"finished between **{lo8:.2f}** and **{hi8:.2f}** bottles/hr — a swing of "
+            f"**{_sp(lo8, md8, hi8):.0f}%** from the worst run to the best. Over **one week** that "
+            f"narrows to **{_sp(lo40, md40, hi40):.0f}%**, and over **a year** to just "
+            f"**{_sp(loy, mdy, hiy):.0f}%**.{_P}"
+            f"Two things are happening at once. The dice average out the longer you watch — that is "
+            f"why the year looks so tidy. But the *level* moves too: one shift averages "
+            f"**{md8:.2f}** bottles/hr against **{mdy:.2f}** over a year, because a line that starts "
+            f"empty spends its first hours filling up before anyone downstream has work.{_P}"
+            f"This is the trap the rest of this lab is built to avoid: **one short run tells you "
+            f"almost nothing about a line.** Change **Run length** in the sidebar and run this line a "
+            f"few times to feel it, then press **🎲 Run replications** to see the whole distribution "
+            f"at once instead of a single sample.")
+
+
 def _rev_var_length(r):
     seed = 20260629
     long9 = _var_year([1] * 9, [6] * 9, seed=seed)
@@ -3272,6 +3313,26 @@ def _rev_var_combined(r):
 
 
 LAB_VAR = [
+    {
+        "icon": "🔭", "phase": "How long you watch",
+        "title": "One run tells you almost nothing",
+        "intro": "Before you compare any two lines, you need to know how badly a *single* run can "
+                 "mislead you. This is the standard balanced line — 6 stations, 1 die × 6 faces each "
+                 "— but we will watch it for just **one shift (8 hours)** instead of a year. Run it, "
+                 "then run it again, and watch the number move.",
+        "setup": "6 stations · 1 die × 6 · reliable supply · **run length: one shift (8 h)**",
+        "apply": {**_line([1] * 6, [6] * 6), "wip_limit_on": False, "supply_reliability": 100,
+                  "demand_variable": False, "starting_inventory": 0, "simulation_years": 1,
+                  "horizon": "One shift (8 h)"},
+        "q": "Run this same line for one shift over and over. The bottles finished will…",
+        "opts": ["Barely move — the line is perfectly balanced",
+                 "Wobble a little, maybe 5% either way",
+                 "Swing wildly — easily double from the worst run to the best",
+                 "Be identical every time — the dice average out"],
+        "answer": 2,
+        "check": lambda r: r.get("hours", 0) <= HOURS_PER_DAY * 5,
+        "reveal": _rev_var_horizon,
+    },
     {
         "icon": "🔗", "phase": "Variability compounds",
         "title": "A longer line loses more of its average",
