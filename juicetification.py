@@ -898,6 +898,25 @@ def reset_financials():
         dfx, dpx = DEFAULT_FIN_LOOKUP[f]
         st.session_state[f"fin_fixed_{f}"] = dfx
         st.session_state[f"fin_prod_{f}"] = dpx
+    bump_setup_gen()
+
+
+def bump_setup_gen():
+    """Mark that something other than the user just rewrote the canonical inputs — a lab
+    step's setup, a reset, a challenge retry.
+
+    fin_number_input mirrors each canonical value under a widget key. We used to clear that
+    mirror with session_state.pop(), but popping does not work: on the next rerun Streamlit
+    re-applies the value the *browser* still holds for that widget key when the widget is
+    instantiated, so the stale mirror won overwrote the value the step had just applied.
+    (Observed in the Part 2 capstone: "Fix Line R" is written to start at an order size of
+    2,000, but opened at whatever the student last typed — and since the goal is "within 100
+    of the EOQ" (~184), a default of 150 passed the challenge with no action at all.)
+
+    Bumping a generation counter instead lets fin_number_input *assign* the widget key before
+    the widget is created, which Streamlit does honour.
+    """
+    st.session_state["_setup_gen"] = st.session_state.get("_setup_gen", 0) + 1
 
 
 def reset_line_to_defaults():
@@ -925,6 +944,7 @@ def reset_line_to_defaults():
     st.session_state["scrap_on"] = DEFAULT_SCRAP_ON
     st.session_state["fin_order_size"] = DEFAULT_ORDER_SIZE
     st.session_state["sim_results"] = None
+    bump_setup_gen()
 
 
 def reset_defaults():
@@ -2828,13 +2848,9 @@ def lab_apply_setup(prefix, idx=None, force_reset=False):
     reset_line_to_defaults()                       # clean slate (also clears the last run)
     for k, v in steps[idx]["apply"].items():
         st.session_state[k] = v
-        # The financial inputs (order cost, holding cost, …) are drawn through fin_number_input,
-        # which mirrors each value under a widget-prefixed key and writes it back. If we only set
-        # the canonical key, that stale mirror overwrites it on the next render — so a step that
-        # changes the order/holding cost silently has no effect. Drop the mirrors so the widgets
-        # re-initialize from the value we just applied.
-        st.session_state.pop(f"sb_{k}", None)
-        st.session_state.pop(f"w_{k}", None)
+    # Tell the fin_number_input widgets to re-read what we just applied. Without this they
+    # keep whatever the browser still holds and write it back over these values.
+    bump_setup_gen()
     st.session_state["sim_results"] = None
     if steps[idx].get("challenge"):
         # A challenge that's already been resolved (recorded in progress) keeps its pass/try
@@ -2906,8 +2922,7 @@ def lab_setup_and_run(prefix):
     step = steps[st.session_state[f"{prefix}_step"]]
     for k, v in step["apply"].items():
         st.session_state[k] = v
-        st.session_state.pop(f"sb_{k}", None)   # see lab_apply_setup: let fin widgets re-sync
-        st.session_state.pop(f"w_{k}", None)
+    bump_setup_gen()                            # see bump_setup_gen: let fin widgets re-sync
     st.session_state["anim_speed"] = "Fast"
     st.session_state["lab_autorun"] = True
     # After the run, scroll the fresh result into view and flash the panel — so it's obvious
@@ -5941,7 +5956,15 @@ def fin_number_input(container, label, canon_key, default, *, is_int=False, wpre
         cur = int(cur) if is_int else float(cur)
     except (TypeError, ValueError):
         cur = default
-    out = container.number_input(label, value=cur, key=f"{wprefix}_{canon_key}", **kw)
+    wkey = f"{wprefix}_{canon_key}"
+    # If a lab step's setup (or a reset) has written the canonical value since this widget last
+    # rendered, adopt it. Assigning the widget's own key before the widget is instantiated is
+    # the only thing Streamlit honours here — see bump_setup_gen for what we tried first.
+    gen = st.session_state.get("_setup_gen", 0)
+    if st.session_state.get(f"_gen_{wkey}") != gen:
+        st.session_state[wkey] = cur
+        st.session_state[f"_gen_{wkey}"] = gen
+    out = container.number_input(label, value=cur, key=wkey, **kw)
     st.session_state[canon_key] = int(out) if is_int else float(out)
     return out
 
