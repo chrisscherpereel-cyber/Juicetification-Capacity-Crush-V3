@@ -6825,9 +6825,9 @@ with st.sidebar:
                                f"delivery is missed; raw material in front of Operation 1 swings and the "
                                f"line can starve.")
             if _ordersz_here:
-                st.number_input(
-                    "📦 Raw-material order size (bottles/order)", min_value=1, step=10,
-                    key="fin_order_size",
+                fin_number_input(
+                    st, "📦 Raw-material order size (bottles/order)", "fin_order_size",
+                    DEFAULT_ORDER_SIZE, is_int=True, wprefix="sb", min_value=1, step=10,
                     help="How many bottles the supplier delivers per purchase order — this sets how much "
                          "raw material sits in front of Operation 1. Order size 1 is just-in-time "
                          "(almost no raw inventory, but exposed to a missed delivery). Larger orders "
@@ -6848,10 +6848,10 @@ with st.sidebar:
                          "lost. Off: every bottle produced is sold.")
                 if st.session_state["demand_variable"]:
                     dcol = st.columns(2)
-                    dcol[0].number_input("Demand dice", min_value=1, max_value=9, step=1,
-                                         key="demand_dice")
-                    dcol[1].number_input("Demand faces", min_value=2, max_value=12, step=1,
-                                         key="demand_faces")
+                    fin_number_input(dcol[0], "Demand dice", "demand_dice", DEFAULT_DEMAND_DICE,
+                                     is_int=True, wprefix="sb", min_value=1, max_value=9, step=1)
+                    fin_number_input(dcol[1], "Demand faces", "demand_faces", DEFAULT_DEMAND_FACES,
+                                     is_int=True, wprefix="sb", min_value=2, max_value=12, step=1)
                     dmean = int(st.session_state["demand_dice"]) * (int(st.session_state["demand_faces"]) + 1) / 2
                     st.caption(f"Average demand ≈ {dmean:.1f} bottles/hr "
                                f"({dmean * HOURS_PER_YEAR:,.0f}/yr). Match this to the line's capacity, or "
@@ -6864,9 +6864,9 @@ with st.sidebar:
             st.markdown('<div class="card-sub">Set how many bottles you buy per order, then the two '
                         'costs that pull against each other. Re-run to see the best order size (EOQ) and '
                         'the total-cost curve move.</div>', unsafe_allow_html=True)
-            st.number_input(
-                "📦 Raw-material order size (bottles/order)", min_value=1, step=10,
-                key="fin_order_size",
+            fin_number_input(
+                st, "📦 Raw-material order size (bottles/order)", "fin_order_size",
+                DEFAULT_ORDER_SIZE, is_int=True, wprefix="sb", min_value=1, step=10,
                 help="How many bottles you buy per purchase order. Small orders mean many orders "
                      "(high ordering cost); large orders sit as inventory (high holding cost). The EOQ "
                      "is the size that balances the two.")
@@ -6900,10 +6900,13 @@ with st.sidebar:
                 if any(active_tmp):
                     for i in range(N_OPS):
                         if active_tmp[i]:
-                            st.number_input(
-                                f"Op #{i + 1} — max units of WIP",
-                                min_value=WIP_CAP_MIN, max_value=WIP_CAP_MAX, step=1,
-                                key=f"wip_cap_{i}")
+                            # Explicit value= (see fin_number_input): these inputs only exist
+                            # while the toggle is on, and binding by key alone collapsed them to
+                            # min_value — a WIP cap of 0, which stops the line dead.
+                            fin_number_input(
+                                st, f"Op #{i + 1} — max units of WIP", f"wip_cap_{i}",
+                                DEFAULT_WIP_CAP, is_int=True, wprefix="sb",
+                                min_value=WIP_CAP_MIN, max_value=WIP_CAP_MAX, step=1)
                 else:
                     st.caption("Configure at least one operation above to set its WIP cap.")
 
@@ -6918,8 +6921,9 @@ with st.sidebar:
                         unsafe_allow_html=True)
             st.toggle("Set the reorder point manually", key="reorder_point_on")
             if st.session_state["reorder_point_on"]:
-                st.number_input("Reorder point (bottles)", min_value=1, max_value=2000, step=5,
-                                key="reorder_point")
+                fin_number_input(st, "Reorder point (bottles)", "reorder_point",
+                                 DEFAULT_REORDER_POINT, is_int=True, wprefix="sb",
+                                 min_value=1, max_value=2000, step=5)
                 st.caption("Higher ⇒ order earlier, fatter cushion, higher service level — but more "
                            "raw-material holding cost.")
 
@@ -6939,8 +6943,10 @@ with st.sidebar:
                 if any(active_q):
                     for i in range(N_OPS):
                         if active_q[i]:
-                            st.number_input(f"Op #{i + 1} — scrap %", min_value=0, max_value=95,
-                                            step=5, key=f"scrap_pct_{i}")
+                            fin_number_input(
+                                st, f"Op #{i + 1} — scrap %", f"scrap_pct_{i}",
+                                DEFAULT_SCRAP_PCT, is_int=True, wprefix="sb",
+                                min_value=0, max_value=95, step=5)
                 else:
                     st.caption("Configure at least one operation above to set its scrap rate.")
 
