@@ -183,3 +183,30 @@ This is a deliberate change to a tuned threshold, of the kind this document othe
 reserves for instructor sign-off. It is flagged here rather than made quietly: if the
 `7,100` figure should be something else, it is one number in the `var` challenge's
 `targets`.
+
+## A lab step's setup could be silently discarded by a stale widget
+
+`fin_number_input` keeps each value twice: a canonical session key (`fin_order_size`) that the
+simulation reads, and a widget key (`sb_fin_order_size`) that the number box uses. When a lab
+step's setup wrote the canonical key, the old code cleared the widget key with
+`session_state.pop()` — which does not work. On the next rerun Streamlit re-applies the value
+the *browser* still holds for that widget key as the widget is instantiated, and
+`fin_number_input` then writes that stale value straight back over the canonical one. So a
+step's setup was discarded for any field drawn through this helper.
+
+Worst case found, in the Part 2 capstone: **Fix Line R** is written to start at a deliberately
+wasteful order size of 2,000, and is scored on getting within 100 of the EOQ (≈184). It opened
+at whatever the student last typed — or at the 150 default — so **pressing Run while changing
+nothing passed the challenge**, and "Reset & try again" did not restore the 2,000 either.
+**Fix Line P** showed the same split a student could actually see: the price box read 3.00
+while the caption under it read "Now: $0.50 per bottle".
+
+The fix is a generation counter (`bump_setup_gen`). Every non-user writer of these values — a
+step's setup, `lab_setup_and_run`, `reset_line_to_defaults`, `reset_financials` — bumps it, and
+`fin_number_input` *assigns* its widget key before the widget is created whenever the counter
+has moved. Assigning before instantiation is the one thing Streamlit honours here.
+
+Note this is the third bug in this family (see also the fragment rerun and the hidden-input
+`min_value` collapse). All three were invisible to the headless model tests and only showed up
+when the app was driven in a real browser, because they live in Streamlit's widget state rather
+than in the simulation.
