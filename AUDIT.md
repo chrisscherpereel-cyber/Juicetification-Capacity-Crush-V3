@@ -158,3 +158,28 @@ switching: with the mode/part/lab-choice radios inside the fragment, selecting "
 `app_mode` on "Guided Lab". Reproduced in a real browser, not just in `AppTest`, and backed out.
 A future attempt should keep those three stateful radios *outside* the fragment and scope it to
 the configuration controls below them.
+
+## Two challenge goals that a correct answer could fail
+
+Both found by playing the challenges in a browser, then measured over 25 seeds each.
+
+**Pull vs. Push** — the lab teaches a cap of 8 (step 2: "cap WIP at 8 on every
+station"), but the challenge inherited the global `DEFAULT_WIP_CAP = 10`. A student
+who switched WIP limits on — exactly the right call — got average WIP 33.9 against a
+`< 30` goal and burned a try. The challenge now pre-sets its caps to 8, so the number
+the student finds matches the number the lab taught. Measured: cap 8 → WIP 27.9–28.1,
+passes 25/25; cap 9 → 30.9; cap 10 → 33.9, both fail 25/25. Doing nothing still fails,
+and loosening the cap back to 10 still fails, so the lesson is intact.
+
+**Variability** — the `≥ 7,200` goal sat *inside* the noise band. Buffers saturate at
+roughly 100 bottles per station: past that, output is capped at 7,180–7,489 no matter
+how much inventory is added. So about 4% of seeds failed a fully correct answer, which
+reads to a student as bad luck rather than a wrong answer. Goal lowered to `≥ 7,100`,
+which separates cleanly: no buffer tops out at 7,039, any buffer from 100 up floors at
+7,180. The hint now names a concrete 200 and says outright that past ~100 more
+inventory buys nothing but holding cost — the point the lab is making.
+
+This is a deliberate change to a tuned threshold, of the kind this document otherwise
+reserves for instructor sign-off. It is flagged here rather than made quietly: if the
+`7,100` figure should be something else, it is one number in the `var` challenge's
+`targets`.

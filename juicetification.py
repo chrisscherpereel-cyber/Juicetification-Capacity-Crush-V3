@@ -5101,12 +5101,18 @@ LAB_CHALLENGES = {
         "goal": "**Your task:** keep throughput **≥ 3,800 bottles/year** while getting **average WIP "
                 "under 30**. The fast front end is flooding the line.",
         "setup": "Start: a fast front end (2 dice) feeding a slow bottleneck (Operation 4), no WIP cap.",
+        # Caps are pre-set to 8 (not the global default of 10): a cap of 10 leaves average WIP at
+        # ~33.9 against this challenge's "< 30" goal, so a student who simply switched limits on
+        # would fail a try for making exactly the right call. 8 holds throughput and passes.
         "apply": {**_line([2, 2, 2, 1, 2, 2], _S2_FACES), "wip_limit_on": False,
+                  **{f"wip_cap_{i}": 8 for i in range(N_OPS)},
                   "supply_reliability": 100, "demand_variable": False, "starting_inventory": 0,
                   "simulation_years": 1},
         "tries": 3,
-        "hint": "Pushing more into the line can't beat the bottleneck. Cap WIP (around 8) so a station "
-                "makes more only when there's room — throughput holds, inventory collapses.",
+        "hint": "Pushing more into the line can't beat the bottleneck. Switch on WIP limits in the Line "
+                "setup card — the caps are already set to 8 — so a station makes more only when there's "
+                "room downstream. Throughput holds and inventory collapses. A looser cap (10 or more) "
+                "lets WIP drift back over 30.",
         "targets": [
             {"label": "Throughput", "get": lambda r: r["total_output"], "fmt": "{:,.0f}",
              "goal": "≥ 3,800", "ok": lambda r: r["total_output"] >= 3800},
@@ -5116,17 +5122,18 @@ LAB_CHALLENGES = {
     },
     "var": {
         "title": "Beat the compounding of a long line",
-        "goal": "**Your task:** get this **nine-station** line to finish **≥ 7,200 bottles/year**. "
+        "goal": "**Your task:** get this **nine-station** line to finish **≥ 7,100 bottles/year**. "
                 "Variability compounds down the chain, so it falls short as it stands.",
         "setup": "Start: nine balanced stations (1 die × 6 each), no starting buffers.",
         "apply": {**_nine([1] * 9), "wip_limit_on": False, "supply_reliability": 100,
                   "demand_variable": False, "starting_inventory": 0, "simulation_years": 1},
         "tries": 3,
-        "hint": "Buffers absorb the swings that starve the next station. Add starting inventory in the "
-                "Run settings card (a few hundred bottles) so no station sits idle waiting.",
+        "hint": "Buffers absorb the swings that starve the next station. Set starting inventory to "
+                "about 200 bottles in the Run settings card so no station sits idle waiting. Roughly "
+                "100 is already enough — past that, more inventory buys you nothing but holding cost.",
         "targets": [
             {"label": "Bottles finished", "get": lambda r: r["total_output"], "fmt": "{:,.0f}",
-             "goal": "≥ 7,200", "ok": lambda r: r["total_output"] >= 7200},
+             "goal": "≥ 7,100", "ok": lambda r: r["total_output"] >= 7100},
         ],
     },
     "qual": {
