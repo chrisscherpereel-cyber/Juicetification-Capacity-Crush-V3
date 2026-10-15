@@ -3024,6 +3024,17 @@ def _request_main_run():
     st.session_state["_main_run"] = True
 
 
+def _run_my_design(prefix=None, i=None):
+    """A design challenge's own Run button: run the line exactly as the student configured it
+    (no step setup applied), then bring the scoreboard back into view. Pins the challenge's
+    'last seen run' first if it was never recorded (e.g. the step was reached by a page refresh
+    rather than Next), so this run is always scored as a try."""
+    if prefix is not None and i is not None:
+        st.session_state.setdefault(f"{prefix}_chal_seen_{i}", st.session_state.get("run_counter", 0))
+    st.session_state["_main_run"] = True
+    _nav_bump("run")
+
+
 def reset_simulation():
     """Start over: clear ALL lab progress, saved answers, reflections and challenge state, and
     return to the very first step of Part 1. The line config is reset to defaults too. This is a
@@ -5852,8 +5863,14 @@ def _render_challenge(prefix, i, challenge, results):
         resolved = passed or attempts >= tries
 
     st.markdown('<div class="chal-inst">Redesign the line with the controls in the sidebar, then press '
-                '<b>▶ Run this line</b> in the 🚀 Run card. Each run is one try.</div>',
+                '<b>▶ Run my design</b> just below. Each run is one try.</div>',
                 unsafe_allow_html=True)
+    if not resolved:
+        st.button(f"▶  Run my design  (uses 1 of your {tries} tries)", type="primary",
+                  use_container_width=True, key=f"{prefix}_chalrun_{i}",
+                  on_click=_lab_nav_cb, args=(_run_my_design, prefix, i),
+                  help="Runs the line exactly as you've set it in the sidebar — your design, "
+                       "not a preset.")
     if have and not graded_run:
         st.info(f"That run was **{run_horizon}**, so it didn't use a try. Short runs are great "
                 "for *seeing* variability, but they're too noisy to judge a design on — set "
@@ -5886,7 +5903,8 @@ def _render_challenge(prefix, i, challenge, results):
     elif have and attempts > 0:
         st.info("**Not there yet** — check the ✗ rows above. Hint: " + _md_escape(challenge.get("hint", "")))
     else:
-        st.caption("Adjust the line in the sidebar and run it to see how you score against the goal.")
+        st.caption("Adjust the line in the sidebar, then press **▶ Run my design** to see how you "
+                   "score against the goal.")
 
     st.button("↺  Reset & try again", use_container_width=True,
               on_click=lab_apply_setup, args=(prefix, i), kwargs={"force_reset": True},
@@ -5898,6 +5916,11 @@ def _lab_nav_cb(fn, *args):
     """Thin wrapper kept so the lab panel's buttons share one call shape. The panel is no
     longer a fragment, so these callbacks already run in the app scope and need no escalation."""
     fn(*args)
+
+
+_RUN_STEP_HELP = ("Sets the line up exactly the way this step needs it (any changes you made in the "
+                  "sidebar are replaced), then runs it. This is the button that moves you through "
+                  "the lab.")
 
 
 def render_lab(results, prefix):
@@ -6002,7 +6025,7 @@ def render_lab(results, prefix):
                             'once the run is in.</div>', unsafe_allow_html=True)
                     st.button("▶  Set up & run this step", type="primary", use_container_width=True,
                               on_click=_lab_nav_cb, args=(lab_setup_and_run, prefix),
-                              key=f"{prefix}_run_{i}")
+                              key=f"{prefix}_run_{i}", help=_RUN_STEP_HELP)
                     st.radio(f"**Diagnose:** {_md_escape(step['q'])}", _opts,
                              key=_pk, on_change=_on_answer_change, disabled=not _ran, **_rkw)
                     if not _ran:
@@ -6013,7 +6036,7 @@ def render_lab(results, prefix):
             if not (not est_cfg and step.get("diagnose")):
                 st.button("▶  Set up & run this step", type="primary", use_container_width=True,
                           on_click=_lab_nav_cb, args=(lab_setup_and_run, prefix),
-                          key=f"{prefix}_run_{i}")
+                          key=f"{prefix}_run_{i}", help=_RUN_STEP_HELP)
 
             matched = bool(results) and "config" in results
             if matched:
@@ -7005,9 +7028,9 @@ with st.sidebar:
             st.radio("Which guided lab?", _part_options,
                      key="lab_choice", label_visibility="collapsed",
                      on_change=lab_on_choice_change)
-            st.caption("Each step **sets the line up for you** the moment you open it — just press "
-                       "**Set up & run this step** to see it go, or tweak the controls below and re-run "
-                       "to experiment with your own \"what if\".")
+            st.caption("Each step **sets the line up for you** — press **Set up & run this step** in "
+                       "the lab panel to see it go. Want to experiment? Tweak the controls below and "
+                       "press **🧪 Run my changes**.")
 
         # ---- Progress tracker (this part) + report download ----
         with st.container(border=True, key="prog_card"):
@@ -7375,12 +7398,16 @@ with st.sidebar:
         caps_now = [int(st.session_state[f"capacity_{i}"]) for i in range(N_OPS)]
         sides_now = [int(st.session_state[f"sides_{i}"]) for i in range(N_OPS)]
         errs_now = validation_errors(caps_now, sides_now)
-        _runlabel = "▶  Run this line" if is_lab else "▶  Run Simulation"
-        run_clicked = st.button(_runlabel, type="primary",
+        # In a guided lab the step's own button (in the lab panel) is the one that moves the
+        # student forward; this one is for experimenting, so it is secondary and says so.
+        _runlabel = "🧪  Run my changes" if is_lab else "▶  Run Simulation"
+        run_clicked = st.button(_runlabel, type=("secondary" if is_lab else "primary"),
                                 use_container_width=True, disabled=bool(errs_now))
         if is_lab:
-            st.caption("Re-runs the line as currently configured — handy after you tweak a control "
-                       "to test your own \"what if\".")
+            st.caption("Runs the line **exactly as you've set it here** — it does *not* reset to the "
+                       "step's setup. Use it to try your own \"what if\". To move through the lab, "
+                       "use the button in the lab panel (**Set up & run this step**, or **Run my "
+                       "design** in a challenge).")
         if SHOW_REPS:
             st.number_input("Replications (run the line many times)", min_value=2, max_value=100,
                             step=1, key="n_reps",
@@ -7558,11 +7585,15 @@ if not IS_LAB:
 
 # A Run button in the MAIN window (not only the sidebar), so it is always reachable without
 # scrolling the sidebar. It requests a run via a flag the trigger picks up below.
-_mrc1, _mrc2 = st.columns([2, 1])
-with _mrc2:
-    st.button("▶  Run this line" if IS_LAB else "▶  Run Simulation",
-              type="primary", use_container_width=True, disabled=bool(errs),
-              key="main_run_btn", on_click=_request_main_run)
+# Sandbox only: in a guided lab this sat right above the lab panel as a second big orange "Run",
+# and students pressed it instead of the step's own button — running whatever the sidebar
+# happened to hold rather than the step's setup. Labs now have one run button per step, in the
+# panel (plus the secondary "Run my changes" in the sidebar for experimenting).
+if not IS_LAB:
+    _mrc1, _mrc2 = st.columns([2, 1])
+    with _mrc2:
+        st.button("▶  Run Simulation", type="primary", use_container_width=True,
+                  disabled=bool(errs), key="main_run_btn", on_click=_request_main_run)
 
 # ---- Run trigger: simulate, then play every output back live into a placeholder ----
 SPEED_DELAY = {"Instant": 0.0, "Fast": 0.012, "Normal": 0.03, "Slow": 0.07}
@@ -7733,9 +7764,12 @@ if errs:
         st.warning(e)
 
 elif results is None:
-    st.markdown('<div class="pill pill-info">Configure the line in the sidebar, then press '
-                '<b>Run Simulation</b>. Every output below will fill in live as the days play.</div>',
-                unsafe_allow_html=True)
+    st.markdown('<div class="pill pill-info">'
+                + ('Press <b>▶ Set up &amp; run this step</b> in the lab panel above. The results '
+                   'will appear here.' if IS_LAB else
+                   'Configure the line in the sidebar, then press <b>Run Simulation</b>. Every '
+                   'output below will fill in live as the days play.')
+                + '</div>', unsafe_allow_html=True)
     with st.container(border=True, key="config_card"):
         st.markdown('<div class="card-title">Planned line</div>', unsafe_allow_html=True)
         st.dataframe(
