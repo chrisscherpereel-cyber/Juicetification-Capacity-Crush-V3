@@ -456,12 +456,10 @@ def _autosave():
         enc = json.dumps(snap, separators=(",", ":"), sort_keys=True)
         if st.session_state.get("_last_saved") == enc:
             return
-        if store.save(_STORE_GAME, _STORE_SID, snap):
+        # Queued, not awaited: the upload runs in the background so the click returns at once
+        # (see student_store.save_async). The status line below reports how the upload went.
+        if store.save_async(_STORE_GAME, _STORE_SID, snap):
             st.session_state["_last_saved"] = enc
-            st.session_state["_last_saved_ts"] = time.time()
-            st.session_state["_save_failed"] = False
-        else:
-            st.session_state["_save_failed"] = True
     except Exception:
         # Record the failure so the UI can warn honestly instead of claiming work was saved.
         st.session_state["_save_failed"] = True
@@ -6256,7 +6254,8 @@ for _ans_k in list(st.session_state.keys()):
 # lab position, completed steps, reflections, and challenge results take effect cleanly.
 if _STORE_SID and not st.session_state.get("_restored"):
     st.session_state["_restored"] = True
-    _restore_progress(store.load(_STORE_GAME, _STORE_SID))
+    with st.spinner("Loading your saved work…"):
+        _restore_progress(store.load(_STORE_GAME, _STORE_SID))
 
 # Restore saved MC/estimate answers from the URL once (works with or without shared storage),
 # before any widget renders, so a refresh keeps each step's actual selection.
@@ -6791,6 +6790,47 @@ st.markdown(
         .prog-receipt { font-size: 0.8rem; color: #344054; background: #f7f8fc;
                         border: 1px dashed #d8deee; border-radius: 8px; padding: 7px 10px;
                         margin-bottom: 6px; }
+
+        /* "Working…" banner. Streamlit's own running indicator is a tiny icon in the corner,
+           and with this app's header settings it isn't drawn at all, so on a busy class server a
+           click could sit for seconds with no visible sign that anything was happening. While a
+           click is being processed Streamlit marks the not-yet-redrawn parts of the page with
+           data-stale="true" (and shows stStatusWidgetRunningIcon when its header is visible).
+           These rules hang a banner and a moving bar off <body> for exactly that time — on body
+           itself, because anything inside the page gets dimmed along with the stale content and
+           stacked under the sidebar. Pure CSS: it appears as soon as the server starts working. */
+        body:has([data-stale="true"])::after,
+        body:has([data-testid="stStatusWidgetRunningIcon"])::after {
+            content: "⏳  Working on it… this can take a few seconds when the whole class is on.";
+            position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+            z-index: 1000002; max-width: calc(100vw - 32px); box-sizing: border-box;
+            background: #1f2a44; color: #fff; text-align: center;
+            padding: 9px 18px; border-radius: 999px;
+            font: 600 0.95rem 'Inter', sans-serif;
+            box-shadow: 0 6px 20px rgba(15, 23, 42, .28);
+            pointer-events: none;
+            animation: jcc-busy-in .25s ease-out .35s both;   /* no flash on quick clicks */
+        }
+        body:has([data-stale="true"])::before,
+        body:has([data-testid="stStatusWidgetRunningIcon"])::before {
+            content: ""; position: fixed; top: 0; left: 0; right: 0; height: 4px;
+            z-index: 1000003; pointer-events: none;
+            background: linear-gradient(90deg, rgba(234,88,12,.15) 0%, #ea580c 50%,
+                                        rgba(234,88,12,.15) 100%);
+            background-size: 200% 100%;
+            animation: jcc-slide 1.1s linear infinite;
+        }
+        @keyframes jcc-slide { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+        @keyframes jcc-busy-in { from { opacity: 0; } to { opacity: 1; } }
+        @media (max-width: 640px) {
+            body:has([data-stale="true"])::after,
+            body:has([data-testid="stStatusWidgetRunningIcon"])::after {
+                content: "⏳  Working on it…"; white-space: nowrap;
+            }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            body::before, body::after { animation: none !important; }
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -6964,7 +7004,7 @@ with st.sidebar:
                                   if _rd["steps_total"] else 0)
                         if st.session_state.get("_last_completion") != (_code, _score):
                             try:
-                                store.record_completion(_STORE_GAME, _STORE_SID,
+                                store.record_completion_async(_STORE_GAME, _STORE_SID,
                                                         completion_code=_code, score=_score)
                                 st.session_state["_last_completion"] = (_code, _score)
                             except Exception:
@@ -7291,6 +7331,12 @@ st.markdown(
 # progress still rides in the page URL and a downloadable backup is the portable fallback.
 def _save_status_line():
     if store.enabled() and _STORE_SID:
+        # Background uploads report back through save_status(); fold that into the same flags.
+        _bg = store.save_status(_STORE_SID)
+        if _bg and _bg.get("ts"):
+            st.session_state["_save_failed"] = not _bg["ok"]
+            if _bg["ok"]:
+                st.session_state["_last_saved_ts"] = _bg["ts"]
         if st.session_state.get("_save_failed"):
             st.warning(f"⚠️ Signed in as **{_STORE_SID}**, but the last save did **not** go through. "
                        "Your latest changes are still in this browser (and in the page link); "

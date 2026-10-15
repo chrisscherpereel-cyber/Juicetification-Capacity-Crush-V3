@@ -226,6 +226,115 @@ def save(game, sid, state, progress=None, step=None, score=None):
     return True
 
 
+# ---------------------------------------------------------------------------------------
+# Background saving. save() and record_completion() upload to Dropbox inside the caller's
+# Streamlit run, so every autosaving click waited on an internet round trip — and once ~30
+# students were clicking, Dropbox rate limiting plus the retry backoff could hold a click for
+# seconds with nothing on screen. The *_async variants encrypt the payload (fast, in the
+# caller) and hand the upload to a small pool of daemon threads, so the click returns at once.
+# Snapshots for the same file are coalesced: only the newest one is uploaded, which also cuts
+# the number of Dropbox calls when a student clicks quickly. Uploads for one file never run
+# concurrently, so an older snapshot can't overwrite a newer one. save_status(sid) reports the
+# outcome of that student's latest upload so the app can still warn honestly on failure.
+# Additive: save() / record_completion() are unchanged for the other apps sharing this module.
+# ---------------------------------------------------------------------------------------
+_ASYNC_WORKERS = 4
+_ASYNC_SETTLE = 0.6          # seconds to let a burst of clicks coalesce before uploading
+_pending = {}                # path -> (data, sid)
+_inflight = set()            # paths being uploaded right now
+_cv = threading.Condition()
+_status = {}                 # sid -> {"ok": bool, "ts": float, "pending": bool}
+_workers_started = False
+
+
+def _async_worker():
+    while True:
+        with _cv:
+            while not any(p not in _inflight for p in _pending):
+                _cv.wait()
+        time.sleep(_ASYNC_SETTLE)
+        with _cv:
+            ready = [p for p in _pending if p not in _inflight]
+            if not ready:
+                continue
+            path = ready[0]
+            data, sid = _pending.pop(path)
+            _inflight.add(path)
+        ok = True
+        try:
+            _upload(path, data)
+        except Exception:
+            ok = False
+        with _cv:
+            _inflight.discard(path)
+            if sid is not None:
+                still = any(v[1] == sid for v in _pending.values())
+                _status[sid] = {"ok": ok, "ts": time.time(), "pending": still}
+            _cv.notify_all()
+
+
+def _enqueue(path, data, sid):
+    global _workers_started
+    with _cv:
+        if not _workers_started:
+            for _ in range(_ASYNC_WORKERS):
+                threading.Thread(target=_async_worker, daemon=True,
+                                 name="student_store_upload").start()
+            _workers_started = True
+        _pending[path] = (data, sid)
+        if sid is not None:
+            prev = _status.get(sid, {})
+            _status[sid] = {"ok": prev.get("ok", True), "ts": prev.get("ts"), "pending": True}
+        _cv.notify_all()
+
+
+def save_async(game, sid, state, progress=None, step=None, score=None):
+    """Like save(), but returns immediately; the upload happens in the background."""
+    if not ENABLED or not sid:
+        return False
+    payload = dict(state)
+    payload["_student"] = sid
+    payload["_updated_at"] = _now_iso()
+    if progress is not None:
+        try:
+            payload["_progress"] = max(0.0, min(1.0, float(progress)))
+        except (TypeError, ValueError):
+            pass
+    if step is not None:
+        payload["_step"] = str(step)
+    if score is not None:
+        payload["_score"] = score
+    _enqueue(_progress_path(game, sid),
+             _fernet().encrypt(json.dumps(payload, separators=(",", ":")).encode()), sid)
+    return True
+
+
+def record_completion_async(game, sid, completion_code=None, score=None, extra=None):
+    """Like record_completion(), but returns immediately."""
+    if not ENABLED or not sid:
+        return False
+    rec = {"student": sid, "completion_code": completion_code,
+           "score": score, "extra": extra}
+    _enqueue(_completion_path(game, sid), _fernet().encrypt(json.dumps(rec).encode()), sid)
+    return True
+
+
+def save_status(sid):
+    """{'ok', 'ts', 'pending'} for this student's most recent background upload, or None."""
+    with _cv:
+        st_ = _status.get(sid)
+        return dict(st_) if st_ else None
+
+
+def flush(timeout=10.0):
+    """Wait (up to timeout seconds) for queued uploads to finish. For tests and shutdown."""
+    end = time.time() + timeout
+    with _cv:
+        while (_pending or _inflight) and time.time() < end:
+            _cv.wait(timeout=0.1)
+        return not (_pending or _inflight)
+
+
 def record_completion(game, sid, completion_code=None, score=None, extra=None):
     if not ENABLED or not sid:
         return False
