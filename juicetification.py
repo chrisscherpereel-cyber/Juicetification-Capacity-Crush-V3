@@ -5981,11 +5981,39 @@ def render_lab(results, prefix):
                 if _pk in st.session_state and st.session_state[_pk] not in _opts:
                     del st.session_state[_pk]
                 _rkw = {} if _pk in st.session_state else {"index": None}
-                st.radio(f"**Predict:** {_md_escape(step['q'])}", _opts,
-                         key=_pk, on_change=_on_answer_change, **_rkw)
-            st.button("▶  Set up & run this step", type="primary", use_container_width=True,
-                      on_click=_lab_nav_cb, args=(lab_setup_and_run, prefix),
-                      key=f"{prefix}_run_{i}")
+                if step.get("diagnose"):
+                    # Diagnose steps are run-FIRST: the evidence (dashboard, Financial results)
+                    # only exists after the run. With the choices above the Run button, students
+                    # were asked to "read the Financial Results" before there were any. So: the
+                    # Run button comes first, the choices stay locked until this step's run is
+                    # in, and the order is spelled out.
+                    try:
+                        _ran = bool(results) and "config" in results and bool(step["check"](results))
+                    except Exception:
+                        _ran = False
+                    if not _ran:
+                        st.markdown(
+                            '<div class="lab-howto"><b>How this works:</b> '
+                            '<b>①</b> Press <b>▶ Set up &amp; run this step</b> just below. '
+                            '<b>②</b> Read the results it produces'
+                            + (' — especially the <b>💵 Financial results</b> card further down the page'
+                               if prefix == "diag2" else ' on the dashboard below')
+                            + '. <b>③</b> Then come back and pick the cause — the choices unlock '
+                            'once the run is in.</div>', unsafe_allow_html=True)
+                    st.button("▶  Set up & run this step", type="primary", use_container_width=True,
+                              on_click=_lab_nav_cb, args=(lab_setup_and_run, prefix),
+                              key=f"{prefix}_run_{i}")
+                    st.radio(f"**Diagnose:** {_md_escape(step['q'])}", _opts,
+                             key=_pk, on_change=_on_answer_change, disabled=not _ran, **_rkw)
+                    if not _ran:
+                        st.caption("🔒 Run the step first — then choose.")
+                else:
+                    st.radio(f"**Predict:** {_md_escape(step['q'])}", _opts,
+                             key=_pk, on_change=_on_answer_change, **_rkw)
+            if not (not est_cfg and step.get("diagnose")):
+                st.button("▶  Set up & run this step", type="primary", use_container_width=True,
+                          on_click=_lab_nav_cb, args=(lab_setup_and_run, prefix),
+                          key=f"{prefix}_run_{i}")
 
             matched = bool(results) and "config" in results
             if matched:
@@ -6039,8 +6067,15 @@ def render_lab(results, prefix):
                     if step.get("reflect") and _engaged:
                         _render_reflect(prefix, i, step["reflect"])
                 elif _diag:
-                    st.info("👀 Study the dashboard below — **output, WIP, service level, and yield** — "
-                            "then pick your diagnosis above.")
+                    if prefix == "diag2":
+                        st.markdown(
+                            '<div class="lab-fb lab-fb-look">👀 The run is in. Scroll down to the '
+                            '<a href="#jcc-finresults" target="_self"><b>💵 Financial results</b></a> '
+                            'card (and the dashboard: output, service level, cost curve), then pick '
+                            'your diagnosis above.</div>', unsafe_allow_html=True)
+                    else:
+                        st.info("👀 Study the dashboard below — **output, WIP, service level, and "
+                                "yield** — then pick your diagnosis above.")
             elif (step.get("reflect")
                   and (i in _get_progress().get(prefix, set())
                        or (st.session_state.get(f"{prefix}_reflect_{i}") or "").strip())):
@@ -6763,6 +6798,12 @@ st.markdown(
         .chal-val { font-weight: 800; font-variant-numeric: tabular-nums; color: #0f172a;
             min-width: 64px; text-align: right; }
         .chal-tries { font-size: 0.82rem; font-weight: 600; color: #667085; margin: 2px 0 8px; }
+        .lab-howto { font-size: 0.9rem; color: #1e3a5f; background: #eff6ff;
+                     border: 1px solid #bfdbfe; border-radius: 8px; padding: 9px 12px;
+                     margin: 4px 0 10px; line-height: 1.5; }
+        .lab-fb-look { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e3a5f;
+                       padding: 8px 12px; border-radius: 8px; font-weight: 600; }
+        .lab-fb-look a { color: #c2410c; }
         .reflect-chk-h { font-size: 0.88rem; color: #334155; margin: 6px 0 2px; }
         .reflect-q { font-size: 0.92rem; color: #3730a3; background: #eef2ff;
             border: 1px solid #c7d2fe; border-radius: 9px; padding: 9px 12px; margin: 10px 0 6px; }
@@ -7975,6 +8016,8 @@ else:
         fin = get_fin()
         fr = compute_financials(results, caps, sides,
                                 run_years(), fin)
+        st.markdown('<div id="jcc-finresults" style="scroll-margin-top: 4rem;"></div>',
+                    unsafe_allow_html=True)
         with st.container(border=True, key="finresult_card"):
             st.markdown('<div class="card-title">💵 Financial results</div>', unsafe_allow_html=True)
             st.markdown('<div class="card-sub">Profit and loss for this run, using the figures in '
