@@ -404,7 +404,9 @@ def _is_store_progress_key(k):
         return True
     if k.endswith("_step") and k[:-5] in LAB_ORDER:
         return True
-    if "_reflect_" in k:
+    if "_reflect_save_" in k:           # the Save button itself — buttons can't be pre-set
+        return False
+    if "_reflect_" in k or "_rchk_" in k:   # self-explanation text + its self-check boxes
         return True
     if "_chal_attempts_" in k or "_chal_passed_" in k or "_chal_seen_" in k:
         return True
@@ -454,12 +456,10 @@ def _autosave():
         enc = json.dumps(snap, separators=(",", ":"), sort_keys=True)
         if st.session_state.get("_last_saved") == enc:
             return
-        if store.save(_STORE_GAME, _STORE_SID, snap):
+        # Queued, not awaited: the upload runs in the background so the click returns at once
+        # (see student_store.save_async). The status line below reports how the upload went.
+        if store.save_async(_STORE_GAME, _STORE_SID, snap):
             st.session_state["_last_saved"] = enc
-            st.session_state["_last_saved_ts"] = time.time()
-            st.session_state["_save_failed"] = False
-        else:
-            st.session_state["_save_failed"] = True
     except Exception:
         # Record the failure so the UI can warn honestly instead of claiming work was saved.
         st.session_state["_save_failed"] = True
@@ -483,6 +483,60 @@ def _get_answers():
         for k, v in data.items():
             if isinstance(k, str) and ("_pred_" in k or "_est_" in k) and k not in st.session_state:
                 st.session_state[k] = v
+    _restore_reflections_url()
+
+
+# Self-explanations used to live only in this browser session. A refresh, a dropped connection
+# (laptop lid, phone lock, Streamlit Cloud idling the session) or opening the link in a new tab
+# started a fresh session with the "written" markers still in ?refl= but the text itself gone —
+# so the box came back empty and the report said "(not written)". The text and the student's
+# self-check ticks now ride in their own ?rtx= parameter (and in shared storage when it's on).
+_RTX_MAX = 1500        # per-answer cap for the URL copy (the full text stays in the session/store)
+
+
+def _is_reflect_value_key(k):
+    return (isinstance(k, str) and "_reflect_save_" not in k
+            and ("_reflect_" in k or "_rchk_" in k))
+
+
+def _save_reflections_url():
+    ss = st.session_state
+    data = {}
+    for k in list(ss.keys()):
+        if not _is_reflect_value_key(k):
+            continue
+        v = ss[k]
+        if "_rchk_" in k:
+            if v:
+                data[k] = 1
+        elif isinstance(v, str) and v.strip():
+            data[k] = v[:_RTX_MAX]
+    try:
+        enc = base64.urlsafe_b64encode(
+            json.dumps(data, separators=(",", ":"), sort_keys=True).encode()).decode()
+        if st.query_params.get("rtx") != enc:
+            if data:
+                st.query_params["rtx"] = enc
+            elif "rtx" in st.query_params:
+                del st.query_params["rtx"]
+    except Exception:
+        pass
+
+
+def _restore_reflections_url():
+    raw = st.query_params.get("rtx")
+    if not raw:
+        return
+    try:
+        data = json.loads(base64.urlsafe_b64decode(raw.encode()).decode())
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+    for k, v in data.items():
+        if not _is_reflect_value_key(k) or k in st.session_state:
+            continue
+        st.session_state[k] = bool(v) if "_rchk_" in k else str(v)
 
 
 def _save_answers():
@@ -622,7 +676,7 @@ def _report_data(part):
     prog = _get_progress()
     ss = st.session_state
     out = {"labs": [], "steps_done": 0, "steps_total": 0, "labs_done": 0, "labs_total": 0,
-           "refl_written": 0, "refl_total": 0}
+           "refl_written": 0, "refl_total": 0, "refl_good": 0}
     for pre in _part_labs(part):
         if pre not in LABS:
             continue
@@ -639,10 +693,12 @@ def _report_data(part):
         for i, s in enumerate(steps):
             if s.get("reflect"):
                 out["refl_total"] += 1
-                txt = (ss.get(f"{pre}_reflect_{i}") or "").strip()
+                txt, ticks, level, verdict = reflect_self_check(pre, i)
                 if txt:
                     out["refl_written"] += 1
-                refls.append((s["reflect"], txt))
+                    if level == "good":
+                        out["refl_good"] = out.get("refl_good", 0) + 1
+                refls.append((s["reflect"], txt, ticks, level, verdict))
             if s.get("challenge"):
                 chal = {"passed": bool(ss.get(f"{pre}_chal_passed_{i}", False)),
                         "attempts": int(ss.get(f"{pre}_chal_attempts_{i}", 0) or 0),
@@ -651,6 +707,15 @@ def _report_data(part):
                             "done": d, "total": n, "complete": complete,
                             "reflections": refls, "challenge": chal})
     return out
+
+
+def _report_fp(part):
+    """Cheap fingerprint of everything that goes into a part's report (no PDF build)."""
+    try:
+        return hashlib.md5(json.dumps(_report_data(part), sort_keys=True, default=str)
+                           .encode()).hexdigest()
+    except Exception:
+        return None
 
 
 def build_part_report_html(part, student_name):
@@ -672,9 +737,15 @@ def build_part_report_html(part, student_name):
         rfl = ""
         if L["reflections"]:
             items = []
-            for q, a in L["reflections"]:
+            for q, a, ticks, level, verdict in L["reflections"]:
                 a_html = f'<div class="ans">{esc(a)}</div>' if a else '<div class="ans none">— not written —</div>'
-                items.append(f'<div class="refl"><div class="q">{esc(q)}</div>{a_html}</div>')
+                chk = ""
+                if a:
+                    k = sum(1 for _, t in ticks if t)
+                    lis = "".join(f'<li>{"☑" if t else "☐"} {esc(it)}</li>' for it, t in ticks)
+                    chk = (f'<div class="sc {level}"><b>Self-check: {k}/{len(ticks)} — {esc(verdict)}</b>'
+                           f'<ul>{lis}</ul></div>')
+                items.append(f'<div class="refl"><div class="q">{esc(q)}</div>{a_html}{chk}</div>')
             rfl = '<div class="refls"><div class="rh">Self-explanations</div>' + "".join(items) + "</div>"
         secs.append(
             f'<div class="lab"><div class="labhead"><span class="labname">{esc(L["label"])}</span>'
@@ -704,6 +775,8 @@ def build_part_report_html(part, student_name):
   .refls {{ margin-top:10px; }} .rh {{ font-weight:700; font-size:.85rem; color:#5b6472; margin-bottom:4px; }}
   .refl {{ margin:8px 0; }} .q {{ font-size:.88rem; color:#475569; }}
   .ans {{ background:#eef2ff; border:1px solid #c7d2fe; border-radius:7px; padding:7px 10px; margin-top:3px; }}
+  .sc {{ font-size:.82rem; margin-top:4px; color:#334155; }} .sc ul {{ margin:2px 0 0; padding-left:16px; list-style:none; }}
+  .sc.good b {{ color:#15803d; }} .sc.unchecked b {{ color:#5b6472; }} .sc.ok b, .sc.warn b {{ color:#8a5300; }} .sc.no b {{ color:#b42318; }}
   .ans.none {{ background:#fff5f5; border-color:#fecaca; color:#b42318; }}
   footer {{ color:#8a93a6; font-size:.78rem; margin-top:22px; border-top:1px solid #e4e7ec; padding-top:10px; }}
 </style></head><body>
@@ -713,7 +786,7 @@ def build_part_report_html(part, student_name):
 <div class="summary">
   <div class="stat"><div class="n">{d['labs_done']}/{d['labs_total']}</div><div class="l">labs complete</div></div>
   <div class="stat"><div class="n">{d['steps_done']}/{d['steps_total']}</div><div class="l">steps done ({pct}%)</div></div>
-  <div class="stat"><div class="n">{d['refl_written']}/{d['refl_total']}</div><div class="l">self-explanations written</div></div>
+  <div class="stat"><div class="n">{d['refl_written']}/{d['refl_total']}</div><div class="l">self-explanations written ({d['refl_good']} self-checked as good)</div></div>
 </div>
 {"".join(secs)}
 <footer>Generated by Juicetification: Capacity Crush. This report records the student's work on this
@@ -758,7 +831,8 @@ def build_part_report_pdf(part, student_name):
     pdf.multi_cell(0, 6, _pdf_text(
         f"Summary: {d['labs_done']}/{d['labs_total']} labs complete  -  "
         f"{d['steps_done']}/{d['steps_total']} steps ({pct}%)  -  "
-        f"{d['refl_written']}/{d['refl_total']} self-explanations written"), new_x="LMARGIN", new_y="NEXT")
+        f"{d['refl_written']}/{d['refl_total']} self-explanations written "
+        f"({d['refl_good']} self-checked as good)"), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
     for L in d["labs"]:
         status = ("Complete" if L["complete"]
@@ -773,13 +847,23 @@ def build_part_report_pdf(part, student_name):
             cs = ("passed" if c["passed"]
                   else (f"attempted ({c['attempts']} tries)" if c["attempts"] else "not attempted"))
             pdf.multi_cell(0, 5, _pdf_text(f"Design challenge: {cs}"), new_x="LMARGIN", new_y="NEXT")
-        for q, a in L["reflections"]:
+        for q, a, ticks, level, verdict in L["reflections"]:
             pdf.set_text_color(90, 100, 114)
             pdf.set_font("Helvetica", "I", 9)
             pdf.multi_cell(0, 4.6, _pdf_text("Q:  " + q), new_x="LMARGIN", new_y="NEXT")
             pdf.set_text_color(31, 42, 68)
             pdf.set_font("Helvetica", "", 10)
             pdf.multi_cell(0, 5, _pdf_text("A:  " + (a if a else "(not written)")), new_x="LMARGIN", new_y="NEXT")
+            if a:
+                k = sum(1 for _, t in ticks if t)
+                pdf.set_font("Helvetica", "B", 9)
+                pdf.multi_cell(0, 4.6, _pdf_text(f"Self-check: {k}/{len(ticks)} - {verdict}"),
+                               new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font("Helvetica", "", 9)
+                for it, t in ticks:
+                    pdf.multi_cell(0, 4.4, _pdf_text(("   [x] " if t else "   [ ] ") + it),
+                                   new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font("Helvetica", "", 10)
             pdf.ln(1)
         pdf.ln(2.5)
     return bytes(pdf.output())
@@ -2642,6 +2726,11 @@ LAB_OPS = [
         "reveal": _rev_nonconstraint,
         "reflect": "You doubled Operation 2's speed and total output barely moved. In one sentence, "
                    "why didn't the faster station help?",
+        "reflect_check": [
+            "I name the bottleneck (the slowest station) as what sets the pace of the whole line",
+            "I say that Operation 2 was not the bottleneck",
+            "I explain that speeding up a non-bottleneck just adds idle time — it can't raise output",
+        ],
     },
     {
         "icon": "🪢", "phase": "Step 3 — Subordinate",
@@ -2946,7 +3035,7 @@ def reset_simulation():
     for k in list(ss.keys()):
         if not isinstance(k, str):
             continue
-        if ("_pred_" in k or "_est_" in k or "_reflect_" in k
+        if ("_pred_" in k or "_est_" in k or "_reflect_" in k or "_rchk_" in k
                 or "_chal_attempts_" in k or "_chal_passed_" in k or "_chal_seen_" in k
                 or (k.endswith("_step") and k[:-5] in LAB_ORDER)):
             del ss[k]
@@ -2956,7 +3045,7 @@ def reset_simulation():
     ss[f"{first}_step"] = 0
     ss["sim_results"] = None
     ss["_confirm_reset"] = False
-    for _p in ("prog", "refl", "ans"):
+    for _p in ("prog", "refl", "ans", "rtx"):
         try:
             del st.query_params[_p]
         except Exception:
@@ -3995,6 +4084,11 @@ LAB_LITTLE = [
         "reveal": _rev_little_cutwip,
         "reflect": "Cutting WIP shortened the lead time but left throughput unchanged. In one sentence, "
                    "why does W depend on L that way?",
+        "reflect_check": [
+            "I use Little's Law (WIP = throughput × lead time, so W = L ÷ throughput)",
+            "I point out that throughput stayed the same",
+            "I conclude that with less WIP each unit waits in fewer queues, so lead time drops",
+        ],
     },
     {
         "icon": "⚠️", "phase": "Too far",
@@ -4404,6 +4498,11 @@ LAB_SS = [
         "reveal": _rev_ss_add,
         "reflect": "A bigger raw-material cushion pushed the service level up. In one sentence, why does "
                    "holding more safety stock protect the line?",
+        "reflect_check": [
+            "I mention the uncertainty — late or short supplier deliveries",
+            "I explain that the extra stock keeps the line fed while a delivery is late",
+            "I connect that to fewer stockouts, which is why the service level rose",
+        ],
     },
     {
         "icon": "🎯", "phase": "Hit the target",
@@ -4551,6 +4650,11 @@ LAB_QUAL = [
         "reveal": _rev_qual_scrap,
         "reflect": "Station 3 kept its full speed, yet the line's good output collapsed. In one "
                    "sentence, why is a fast, low-yield station a constraint?",
+        "reflect_check": [
+            "I separate good output from total output (scrapped units don't count)",
+            "I explain that Station 3 throws away units — and all the upstream work in them",
+            "I conclude a station's real capacity is its speed × its yield",
+        ],
     },
     {
         "icon": "🔧", "phase": "Fix the wrong thing",
@@ -4672,6 +4776,11 @@ LAB_DIAG = [
         "opts": _DIAG_OPTS, "answer": 0,
         "reflect": "In one sentence: which dashboard numbers ruled out the supplier and quality, "
                    "leaving a capacity bottleneck?",
+        "reflect_check": [
+            "I name the number that ruled out the supplier",
+            "I name the number that ruled out quality (yield / scrap)",
+            "I say what pointed to a capacity bottleneck (e.g., WIP piling up in front of one station)",
+        ],
         "check": lambda r: r["config"]["faces"][3] == 2 and not r["config"].get("scrap_on")
         and not r["config"].get("reorder_on"),
         "reveal": _rev_diag_bottleneck,
@@ -4713,6 +4822,11 @@ LAB_DIAG = [
         "opts": _DIAG_OPTS, "answer": 2,
         "reflect": "In one sentence: which single metric gave away that the problem was upstream of the "
                    "line — at the supplier?",
+        "reflect_check": [
+            "I name one specific metric",
+            "I explain why it points upstream — the line was starved for material, not blocked inside",
+            "I say why the stations themselves weren't the problem",
+        ],
         "check": lambda r: r["config"].get("reorder_on") and r["config"].get("supply_reliability", 100) <= 60,
         "reveal": _rev_diag_supplier,
     },
@@ -4749,6 +4863,11 @@ LAB_DIAG = [
         "opts": _DIAG_OPTS, "answer": 1,
         "reflect": "In one sentence: how did a fast station end up being the constraint — what number "
                    "exposed it?",
+        "reflect_check": [
+            "I name the number that exposed it (the station's yield or scrap)",
+            "I explain that speed doesn't matter when many of its units are scrapped",
+            "I conclude the constraint is the fewest GOOD units per hour, not the slowest station",
+        ],
         "check": lambda r: bool(r["config"].get("scrap_on")),
         "reveal": _rev_diag_yield,
     },
@@ -4787,6 +4906,11 @@ LAB_DIAG = [
         "opts": _DIAG_OPTS, "answer": 3,
         "reflect": "In one sentence: why is more capacity the wrong fix here, even though inventory is "
                    "piling up?",
+        "reflect_check": [
+            "I point out that throughput didn't rise even though inventory kept piling up",
+            "I explain that work is released faster than the bottleneck can finish it",
+            "I say the right fix is to limit WIP / control releases, not add capacity",
+        ],
         "check": lambda r: r["config"]["dice"][0] >= 3 and not r["config"].get("wip_on"),
         "reveal": _rev_diag_wip,
     },
@@ -4885,6 +5009,11 @@ LAB_DIAG2 = [
         "q": "What's wrong with Line P?",
         "opts": _DIAG2_OPTS, "answer": 0,
         "reflect": "In one sentence: which two numbers in the P&L told you the price was the problem?",
+        "reflect_check": [
+            "I name both numbers from the P&L",
+            "I compare them (e.g., the price is below the cost of making a unit)",
+            "I explain why selling more units wouldn't fix it",
+        ],
         "check": lambda r: abs(float(r.get("config", {}).get("revenue_per_unit", 3.0)) - 0.50) < 0.01,
         "reveal": _rev_diag2_money,
     },
@@ -4924,6 +5053,11 @@ LAB_DIAG2 = [
         "opts": _DIAG2_OPTS, "answer": 2,
         "reflect": "In one sentence: which single metric revealed that the problem was the supplier, "
                    "not the price or the order size?",
+        "reflect_check": [
+            "I name one specific metric",
+            "I explain how it points to the supplier",
+            "I say why the price and the order size were ruled out",
+        ],
         "check": lambda r: r["config"].get("reorder_on") and r["config"].get("supply_reliability", 100) <= 60,
         "reveal": _rev_diag2_stockout,
     },
@@ -4961,6 +5095,11 @@ LAB_DIAG2 = [
         "opts": _DIAG2_OPTS, "answer": 1,
         "reflect": "In one sentence: how did the cost-vs-order-size curve show the order size was far "
                    "from its sweet spot?",
+        "reflect_check": [
+            "I describe the curve's shape (it has a lowest-cost point — the sweet spot)",
+            "I say where the current order size sat compared with that sweet spot",
+            "I name which cost was driving the total up at that order size",
+        ],
         "check": lambda r: int(r["config"].get("order_size", 0)) >= 1000,
         "reveal": _rev_diag2_order,
     },
@@ -5592,25 +5731,95 @@ def _lab_html(s):
     return s
 
 
+REFLECT_EVIDENCE_CHECK = ("I back it up with evidence from my own run — a number or something "
+                          "I saw on the dashboard")
+
+
+def _reflect_checks_for(prefix, i):
+    """The self-check list for a step's explanation: its own items plus the evidence check."""
+    try:
+        items = list(LABS[prefix]["steps"][i].get("reflect_check") or [])
+    except Exception:
+        items = []
+    return items + [REFLECT_EVIDENCE_CHECK]
+
+
+def reflect_self_check(prefix, i):
+    """(text, [(item, ticked), ...], level, verdict) for one explanation. level is one of
+    'none' (nothing written), 'good', 'ok', 'warn', 'no'."""
+    ss = st.session_state
+    txt = (ss.get(f"{prefix}_reflect_{i}") or "").strip()
+    items = _reflect_checks_for(prefix, i)
+    ticks = [(it, bool(ss.get(f"{prefix}_rchk_{i}_{j}", False))) for j, it in enumerate(items)]
+    n, k = len(ticks), sum(1 for _, t in ticks if t)
+    words = len(txt.split())
+    if not txt:
+        return txt, ticks, "none", "Not written yet"
+    if k == 0:
+        return txt, ticks, "unchecked", "Self-check not done yet"
+    if k == n and words < 8:
+        return txt, ticks, "warn", (f"Every box is ticked, but the answer is only {words} words — "
+                                    "re-read it and make sure each point is really there")
+    if k == n:
+        return txt, ticks, "good", "Good answer — it covers every point"
+    if k >= n - 1:
+        return txt, ticks, "ok", "Almost there — add the unticked point"
+    return txt, ticks, "no", f"Not there yet — {n - k} of {n} points missing; revise and re-check"
+
+
+def _on_reflect_change(prefix, i):
+    """Fires the moment the student commits an edit (Save button, Ctrl+Enter, or clicking away):
+    back the text up to the URL and shared storage right away, not just on the next step."""
+    if (st.session_state.get(f"{prefix}_reflect_{i}") or "").strip():
+        mark_reflect_done(prefix, i)
+    _save_reflections_url()
+    _autosave()
+
+
+def _on_reflect_check_change():
+    _save_reflections_url()
+    _autosave()
+
+
 def _render_reflect(prefix, i, prompt):
-    """Free-text self-explanation after a key reveal. The act of generating the sentence is
-    what does the learning; what the student writes is saved into their submission report."""
+    """Free-text self-explanation after a key reveal, followed by a short self-check: the
+    student ticks which of the key points their own answer contains and gets a plain verdict.
+    Generating the sentence does the learning; checking it against the points is the
+    self-assessment. Text, ticks and verdict all go into the submission report."""
     st.markdown('<div class="reflect-q">✍️ <b>Explain it:</b> ' + _lab_html(prompt) + "</div>",
                 unsafe_allow_html=True)
     st.text_area("Your explanation", key=f"{prefix}_reflect_{i}",
                  label_visibility="collapsed",
-                 placeholder="In your own words — one or two sentences…")
+                 placeholder="In your own words — one or two sentences…",
+                 on_change=_on_reflect_change, args=(prefix, i))
     # An explicit button to accept the text (clicking it commits what's typed) so students don't
     # have to discover Ctrl+Enter.
     st.button("Save my answer", key=f"{prefix}_reflect_save_{i}")
-    txt = (st.session_state.get(f"{prefix}_reflect_{i}") or "").strip()
-    if txt:
-        mark_reflect_done(prefix, i)
-        st.caption("✓ Saved — it will appear in your report. Putting it in your own words is what "
-                   "makes the idea stick.")
-    else:
+    txt, ticks, level, verdict = reflect_self_check(prefix, i)
+    if not txt:
         st.caption("Type a sentence and press **Save my answer** (or Ctrl+Enter). It's included in "
                    "your report, so it's worth doing.")
+        return
+    mark_reflect_done(prefix, i)
+    st.caption("✓ Saved — it will appear in your report.")
+    st.markdown('<div class="reflect-chk-h">🔎 <b>Check your answer.</b> Re-read what you wrote and '
+                'tick only the points it actually contains:</div>', unsafe_allow_html=True)
+    for j, (item, _t) in enumerate(ticks):
+        st.checkbox(_md_escape(item), key=f"{prefix}_rchk_{i}_{j}",
+                    on_change=_on_reflect_check_change)
+    # Re-read after the boxes so the verdict reflects this run's ticks.
+    _txt, _ticks, level, verdict = reflect_self_check(prefix, i)
+    k, n = sum(1 for _, t in _ticks if t), len(_ticks)
+    msg = f"**{verdict}** ({k} of {n} points)."
+    if level == "unchecked":
+        st.info("Tick the points your answer contains to see whether it's a good answer.")
+    elif level == "good":
+        st.success("✅ " + msg)
+    elif level in ("ok", "warn"):
+        st.warning("🟡 " + msg + (" Edit your answer above, press **Save my answer**, then re-check."
+                                  if level == "ok" else ""))
+    else:
+        st.error("🔴 " + msg + " Edit your answer above, press **Save my answer**, then re-check.")
 
 
 def _render_challenge(prefix, i, challenge, results):
@@ -5832,6 +6041,12 @@ def render_lab(results, prefix):
                 elif _diag:
                     st.info("👀 Study the dashboard below — **output, WIP, service level, and yield** — "
                             "then pick your diagnosis above.")
+            elif (step.get("reflect")
+                  and (i in _get_progress().get(prefix, set())
+                       or (st.session_state.get(f"{prefix}_reflect_{i}") or "").strip())):
+                st.caption("↩️ You've already done this step — your explanation is below and you can "
+                           "still edit it. Press **▶ Set up & run this step** to see the result again.")
+                _render_reflect(prefix, i, step["reflect"])
 
             # To advance you must both run the step and commit an answer. Build a plain-language
             # list of whatever's still missing so it's obvious what "Next" is waiting for.
@@ -5842,7 +6057,9 @@ def render_lab(results, prefix):
                 _engaged = st.session_state.get(f"{prefix}_pred_{i}") is not None
                 _eng_todo = ("<b>pick your diagnosis above</b>" if step.get("diagnose")
                              else "<b>make your prediction above</b>")
-            answered = _engaged and matched
+            # A step already completed stays unlocked when you come back to it, so reviewing an
+            # earlier step (or your explanation) doesn't force a re-run just to move forward again.
+            answered = _engaged and (matched or i in _get_progress().get(prefix, set()))
             _run_todo = "press <b>▶ Set up &amp; run this step</b>"
             _pairs = ([(_run_todo, not matched), (_eng_todo, not _engaged)] if step.get("diagnose")
                       else [(_eng_todo, not _engaged), (_run_todo, not matched)])
@@ -6028,6 +6245,7 @@ for _ans_k in list(st.session_state.keys()):
         continue
     if ("_pred_" in _ans_k or "_est_" in _ans_k
             or "_chal_passed_" in _ans_k or "_chal_attempts_" in _ans_k or "_chal_seen_" in _ans_k
+            or "_rchk_" in _ans_k
             or ("_reflect_" in _ans_k and "_reflect_save_" not in _ans_k)):
         st.session_state[_ans_k] = st.session_state[_ans_k]
 
@@ -6036,7 +6254,8 @@ for _ans_k in list(st.session_state.keys()):
 # lab position, completed steps, reflections, and challenge results take effect cleanly.
 if _STORE_SID and not st.session_state.get("_restored"):
     st.session_state["_restored"] = True
-    _restore_progress(store.load(_STORE_GAME, _STORE_SID))
+    with st.spinner("Loading your saved work…"):
+        _restore_progress(store.load(_STORE_GAME, _STORE_SID))
 
 # Restore saved MC/estimate answers from the URL once (works with or without shared storage),
 # before any widget renders, so a refresh keeps each step's actual selection.
@@ -6544,6 +6763,7 @@ st.markdown(
         .chal-val { font-weight: 800; font-variant-numeric: tabular-nums; color: #0f172a;
             min-width: 64px; text-align: right; }
         .chal-tries { font-size: 0.82rem; font-weight: 600; color: #667085; margin: 2px 0 8px; }
+        .reflect-chk-h { font-size: 0.88rem; color: #334155; margin: 6px 0 2px; }
         .reflect-q { font-size: 0.92rem; color: #3730a3; background: #eef2ff;
             border: 1px solid #c7d2fe; border-radius: 9px; padding: 9px 12px; margin: 10px 0 6px; }
         .lab-count { text-align: center; font-size: 0.78rem; font-weight: 700; color: #667085;
@@ -6570,6 +6790,47 @@ st.markdown(
         .prog-receipt { font-size: 0.8rem; color: #344054; background: #f7f8fc;
                         border: 1px dashed #d8deee; border-radius: 8px; padding: 7px 10px;
                         margin-bottom: 6px; }
+
+        /* "Working…" banner. Streamlit's own running indicator is a tiny icon in the corner,
+           and with this app's header settings it isn't drawn at all, so on a busy class server a
+           click could sit for seconds with no visible sign that anything was happening. While a
+           click is being processed Streamlit marks the not-yet-redrawn parts of the page with
+           data-stale="true" (and shows stStatusWidgetRunningIcon when its header is visible).
+           These rules hang a banner and a moving bar off <body> for exactly that time — on body
+           itself, because anything inside the page gets dimmed along with the stale content and
+           stacked under the sidebar. Pure CSS: it appears as soon as the server starts working. */
+        body:has([data-stale="true"])::after,
+        body:has([data-testid="stStatusWidgetRunningIcon"])::after {
+            content: "⏳  Working on it… this can take a few seconds when the whole class is on.";
+            position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+            z-index: 1000002; max-width: calc(100vw - 32px); box-sizing: border-box;
+            background: #1f2a44; color: #fff; text-align: center;
+            padding: 9px 18px; border-radius: 999px;
+            font: 600 0.95rem 'Inter', sans-serif;
+            box-shadow: 0 6px 20px rgba(15, 23, 42, .28);
+            pointer-events: none;
+            animation: jcc-busy-in .25s ease-out .35s both;   /* no flash on quick clicks */
+        }
+        body:has([data-stale="true"])::before,
+        body:has([data-testid="stStatusWidgetRunningIcon"])::before {
+            content: ""; position: fixed; top: 0; left: 0; right: 0; height: 4px;
+            z-index: 1000003; pointer-events: none;
+            background: linear-gradient(90deg, rgba(234,88,12,.15) 0%, #ea580c 50%,
+                                        rgba(234,88,12,.15) 100%);
+            background-size: 200% 100%;
+            animation: jcc-slide 1.1s linear infinite;
+        }
+        @keyframes jcc-slide { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+        @keyframes jcc-busy-in { from { opacity: 0; } to { opacity: 1; } }
+        @media (max-width: 640px) {
+            body:has([data-stale="true"])::after,
+            body:has([data-testid="stStatusWidgetRunningIcon"])::after {
+                content: "⏳  Working on it…"; white-space: nowrap;
+            }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            body::before, body::after { animation: none !important; }
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -6733,6 +6994,7 @@ with st.sidebar:
                                     "data": build_part_report_html(_cur_part, _name).encode("utf-8"),
                                     "file": f"CapacityCrush_Part{_pnum}_{_slug}.html",
                                     "mime": "text/html", "pdf": False}
+                        _rep["fp"] = _report_fp(_cur_part)
                         st.session_state[_rk] = _rep
                         # Record this part's completion to the shared roster (no-op when storage
                         # is off); skipped when identical to the last record this session wrote.
@@ -6742,13 +7004,17 @@ with st.sidebar:
                                   if _rd["steps_total"] else 0)
                         if st.session_state.get("_last_completion") != (_code, _score):
                             try:
-                                store.record_completion(_STORE_GAME, _STORE_SID,
+                                store.record_completion_async(_STORE_GAME, _STORE_SID,
                                                         completion_code=_code, score=_score)
                                 st.session_state["_last_completion"] = (_code, _score)
                             except Exception:
                                 pass
                     _rep = st.session_state.get(_rk)
-                    if _rep and _rep["name"] == _name:
+                    _stale = bool(_rep) and _rep.get("fp") != _report_fp(_cur_part)
+                    if _stale:
+                        st.warning("Your answers changed since you prepared this report — press "
+                                   "**Prepare my report** again so the download includes them.")
+                    if _rep and _rep["name"] == _name and not _stale:
                         st.download_button(
                             "⬇️ Download my report (PDF)" if _rep["pdf"] else "⬇️ Download my report (.html)",
                             data=_rep["data"], file_name=_rep["file"], mime=_rep["mime"],
@@ -7065,6 +7331,12 @@ st.markdown(
 # progress still rides in the page URL and a downloadable backup is the portable fallback.
 def _save_status_line():
     if store.enabled() and _STORE_SID:
+        # Background uploads report back through save_status(); fold that into the same flags.
+        _bg = store.save_status(_STORE_SID)
+        if _bg and _bg.get("ts"):
+            st.session_state["_save_failed"] = not _bg["ok"]
+            if _bg["ok"]:
+                st.session_state["_last_saved_ts"] = _bg["ts"]
         if st.session_state.get("_save_failed"):
             st.warning(f"⚠️ Signed in as **{_STORE_SID}**, but the last save did **not** go through. "
                        "Your latest changes are still in this browser (and in the page link); "
