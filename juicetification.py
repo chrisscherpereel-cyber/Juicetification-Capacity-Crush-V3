@@ -6799,6 +6799,7 @@ st.markdown(
            These rules hang a banner and a moving bar off <body> for exactly that time — on body
            itself, because anything inside the page gets dimmed along with the stale content and
            stacked under the sidebar. Pure CSS: it appears as soon as the server starts working. */
+        body.jcc-busy-on::after,
         body:has([data-stale="true"])::after,
         body:has([data-testid="stStatusWidgetRunningIcon"])::after {
             content: "⏳  Working on it… this can take a few seconds when the whole class is on.";
@@ -6811,6 +6812,7 @@ st.markdown(
             pointer-events: none;
             animation: jcc-busy-in .25s ease-out .35s both;   /* no flash on quick clicks */
         }
+        body.jcc-busy-on::before,
         body:has([data-stale="true"])::before,
         body:has([data-testid="stStatusWidgetRunningIcon"])::before {
             content: ""; position: fixed; top: 0; left: 0; right: 0; height: 4px;
@@ -6823,6 +6825,7 @@ st.markdown(
         @keyframes jcc-slide { from { background-position: 100% 0; } to { background-position: -100% 0; } }
         @keyframes jcc-busy-in { from { opacity: 0; } to { opacity: 1; } }
         @media (max-width: 640px) {
+            body.jcc-busy-on::after,
             body:has([data-stale="true"])::after,
             body:has([data-testid="stStatusWidgetRunningIcon"])::after {
                 content: "⏳  Working on it…"; white-space: nowrap;
@@ -6834,6 +6837,52 @@ st.markdown(
     </style>
     """,
     unsafe_allow_html=True,
+)
+
+
+# Instant "Working…" feedback, from the browser. The CSS above can only react once the server
+# has *started* a click — and on a crowded Streamlit Cloud server a click can wait in line for
+# seconds before that happens, with nothing on screen. This puts a tiny script into the page
+# itself (once per browser tab) that flags the page busy the instant any app button is pressed,
+# and clears it when the server finishes redrawing (the end-of-run marker at the bottom of this
+# file changes), or after 60 s as a safety net. Byte-identical every run, so Streamlit keeps the
+# same 0-height iframe instead of reloading it.
+_BUSY_JS = r"""
+(function () {
+  var w = window, d = document;
+  if (w.__jccBusyInstalled) return;
+  w.__jccBusyInstalled = true;
+  var body = d.body, timer = null, seenStale = false, markAtClick = null;
+  function marker() { var m = d.querySelector('.jcc-run-done'); return m ? m.className : ''; }
+  function off() { body.classList.remove('jcc-busy-on'); clearTimeout(timer); }
+  function on() {
+    seenStale = false; markAtClick = marker();
+    body.classList.add('jcc-busy-on'); clearTimeout(timer); timer = setTimeout(off, 60000);
+  }
+  d.addEventListener('click', function (e) {
+    var b = e.target && e.target.closest ? e.target.closest('button') : null;
+    if (!b || b.disabled || b.getAttribute('aria-disabled') === 'true') return;
+    if (!b.matches('[data-testid^="stBaseButton"]')) return;          /* st.button widgets only */
+    if (b.closest('[data-testid="stDownloadButton"],[data-testid="stHeader"],'
+                  + '[data-testid="stToolbar"],[data-testid="stSidebarCollapseButton"],'
+                  + '[data-testid="stSidebarCollapsedControl"]')) return; /* no server round trip */
+    on();
+  }, true);
+  new MutationObserver(function () {
+    if (!body.classList.contains('jcc-busy-on')) return;
+    if (marker() !== markAtClick) { off(); return; }                /* the run finished */
+    if (d.querySelector('[data-stale="true"]')) seenStale = true;
+    else if (seenStale) off();
+  }).observe(body, {subtree: true, childList: true, attributes: true,
+                    attributeFilter: ['data-stale', 'class']});
+})();
+"""
+components.html(
+    "<script>(function(){try{var p=window.parent.document;"
+    "if(window.parent.__jccBusyInstalled)return;"
+    "var s=p.createElement('script');s.textContent=" + json.dumps(_BUSY_JS) + ";"
+    "p.head.appendChild(s);}catch(e){}})();</script>",
+    height=0,
 )
 
 
@@ -7522,7 +7571,13 @@ if run_clicked and not errs:
                 float(_eoq_fin["order_cost"]), _eoq_margin,
                 include_q=int(st.session_state["fin_order_size"]),
                 hold_per_day=float(st.session_state.get("fin_raw_holding", DEFAULT_RAW_HOLDING)))
-        if not IS_EOQ_LAB:
+        # The die scan re-runs the whole line once per standard die size (six extra full-year
+        # simulations) just to draw the "profit vs. die size" chart. That chart lives in the
+        # Financial Results card, so only compute it where that card is shown (Sandbox and the
+        # Economics / T-accounting / money-capstone labs). Everywhere else it was the bulk of
+        # a "Set up & run this step" click — roughly 0.7 s of CPU on a fast machine, several
+        # seconds on a crowded Streamlit Cloud server — spent on a chart nobody could see.
+        if SHOW_FINANCIALS and not IS_EOQ_LAB:
             full["die_scan"] = compute_die_scan(
                 caps, sides,
                 int(st.session_state["starting_inventory"]),
@@ -8054,3 +8109,11 @@ if SHOW_SANDBOX_TOOLS and (scA or scB):
                     '(more profit/throughput, less WIP/flow time). Pin both slots to fill the '
                     'comparison.</div>', unsafe_allow_html=True)
         st.html(build_comparison_html(scA, scB))
+
+
+# ---- End-of-run marker (keep this LAST) ----
+# A hidden element whose class changes on every completed run. The in-browser "Working…" script
+# (see _BUSY_JS) clears the banner when it sees this change, i.e. once the whole page is redrawn.
+st.session_state["_run_seq"] = st.session_state.get("_run_seq", 0) + 1
+st.markdown(f'<span class="jcc-run-done jcc-run-{st.session_state["_run_seq"]}" '
+            'style="display:none"></span>', unsafe_allow_html=True)
