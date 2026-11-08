@@ -1196,6 +1196,14 @@ def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_li
     # stream is shared by all students. Callers pass their own random.Random; None falls back to
     # the module stream (single-user / test use).
     _rnd = rng if rng is not None else random
+    # Fast dice: randint(1, s) is exactly 1 + _randbelow(s) — same random stream, same results,
+    # but without randint/randrange's argument checking, which was ~30 % of a simulation's time.
+    # (Verified by tests/test_model.py's fixed-seed back-compat sequence.) Falls back to randint if
+    # a Random implementation doesn't expose _randbelow.
+    _rb = getattr(rng if rng is not None else getattr(random, "_inst", None), "_randbelow", None)
+    if _rb is None:
+        def _rb(s, _ri=_rnd.randint):
+            return _ri(1, s) - 1
     flow_sum = 0
     flow_n = 0
     if track_flow:
@@ -1210,11 +1218,13 @@ def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_li
         for p in range(n)
     ]
 
+    # (dice, faces) per active station, precomputed once rather than looked up every hour.
+    _dice_faces = [(a_caps[p], a_sides[p]) for p in range(n)]
     daily_accum = 0
     for hour in range(1, hours + 1):
         potentials = [
-            sum(_rnd.randint(1, a_sides[p]) for _ in range(a_caps[p]))
-            for p in range(n)
+            (_rb(f) + 1) if c == 1 else (sum([_rb(f) for _ in range(c)]) + c)
+            for c, f in _dice_faces
         ]
 
         # --- supplier delivery (reorder policy). When the raw buffer in front of Op 1
@@ -1300,7 +1310,7 @@ def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_li
         # --- finished goods meet the market ---
         fgi += moved[n - 1]
         if demand_on:
-            d = sum(_rnd.randint(1, demand_faces) for _ in range(demand_dice))
+            d = sum([_rb(demand_faces) for _ in range(demand_dice)]) + demand_dice
             sold_now = fgi if d >= fgi else d
             fgi -= sold_now
             sold += sold_now
