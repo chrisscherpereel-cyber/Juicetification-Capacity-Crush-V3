@@ -15,3 +15,16 @@ toolbarMode = "minimal"
 # Class use: many short-lived sessions from one process.
 maxUploadSize = 1
 enableXsrfProtection = true
+
+[runner]
+# Performance (measured, see PERFORMANCE.md): Streamlit's default runs a FULL Python garbage
+# collection after EVERY script run. Its cost grows with everything in memory — every connected
+# student's session — so with a class connected it was ~45–50 % of the server's work per click.
+# Python's normal automatic collection still runs; memory stayed flat in a 40-student load test.
+postScriptGC = false
+
+[browser]
+# Performance + privacy: don't collect Streamlit's anonymous usage telemetry. With it on, every
+# st.* call on every click records its arguments for telemetry — measured at ~14 % of the
+# server's CPU per click under a 20-student load. Turning it off changes nothing students see.
+gatherUsageStats = false
