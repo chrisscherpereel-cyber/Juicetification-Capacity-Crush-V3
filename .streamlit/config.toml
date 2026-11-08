@@ -20,7 +20,8 @@ enableXsrfProtection = true
 # Performance (measured, see PERFORMANCE.md): Streamlit's default runs a FULL Python garbage
 # collection after EVERY script run. Its cost grows with everything in memory — every connected
 # student's session — so with a class connected it was ~45–50 % of the server's work per click.
-# Python's normal automatic collection still runs; memory stayed flat in a 40-student load test.
+# Python's normal automatic collection still runs. Trade-off measured with 40 students: about
+# +35 MB peak memory (199 -> 234 MB), well inside Community Cloud's 690 MB minimum.
 postScriptGC = false
 
 [browser]
