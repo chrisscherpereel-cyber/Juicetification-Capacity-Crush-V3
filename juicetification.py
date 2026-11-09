@@ -15,6 +15,7 @@ import streamlit.components.v1 as components
 from juice_director import serve_manifest_if_requested, resolve_config
 from manifest import MANIFEST
 import student_store as store
+from login_gate import require_login
 
 # =========================================================
 # Page configuration
@@ -56,18 +57,7 @@ _DIRECTOR_PARAMS, DIRECTOR_CTX = resolve_config(MANIFEST)
 # store.enabled() is False, every store.* call is a safe no-op, and the app behaves exactly
 # as before (no gate, random scenario).
 _STORE_GAME = store.game_code()
-_STORE_SID = store.get_student_id()
-
-if store.enabled() and not _STORE_SID:
-    st.title("🧃 Juicetification: Capacity Crush")
-    st.text_input("Enter your student ID to begin", key="_sid_entry",
-                  placeholder="e.g., your campus username")
-    if st.button("Start", type="primary"):
-        _entered = (st.session_state.get("_sid_entry") or "").strip()
-        if _entered:
-            store.set_student_id(_entered)
-            st.rerun()
-    st.stop()
+_STORE_SID = require_login("Capacity Crush", "🧃")   # shared sign-in screen (login_gate.py)
 
 # Scenario seed. An instructor-set Director ?seed= pins a fixed exercise for everyone;
 # otherwise every student gets their OWN random scenario (a unique result), assigned once and
